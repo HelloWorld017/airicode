@@ -24,15 +24,6 @@
       ];
 
       craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
-      libBuildInputs = with pkgs; [
-        libayatana-appindicator
-        libGL
-        libxkbcommon
-        wayland
-      ];
-      desktopBuildInputs = with pkgs; (libBuildInputs ++ [
-        electron
-      ]);
       packageFor = cargoPackage:
         craneLib.buildPackage {
           pname = cargoPackage;
@@ -40,6 +31,7 @@
           src = craneLib.cleanCargoSource ./.;
           strictDeps = true;
           cargoExtraArgs = "--package ${cargoPackage}";
+          nativeBuildInputs = [ pkgs.git ];
           meta.mainProgram = cargoPackage;
         };
     in {
@@ -48,8 +40,7 @@
       };
 
       devShells.default = craneLib.devShell {
-        packages = [ pkgs.lld ] ++ desktopBuildInputs;
-        LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libBuildInputs;
+        packages = with pkgs; [ git lld ];
       };
     });
 }
