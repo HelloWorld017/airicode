@@ -10,11 +10,12 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    BeforeHookResult, CommandOutput, CommandSpec, Context, Core, Error, EventSink, HookContext,
-    HookRegistry, Message, PluginId, ProjectId, Provider, ProviderEvent, ProviderId,
-    ProviderRegistry, ProviderRequest, Result, Role, RuntimeEvent, SessionId, SessionStore,
-    ToolCallDraft, ToolCallId, ToolContext, ToolExecutionContext, ToolRegistry, ToolServices,
-    TurnId, Workdir,
+    BeforeHookResult, CommandCompletion, CommandContext, CommandId, CommandInvocation,
+    CommandOutput, CommandRegistry, CommandResult, CommandSpec, Context, Core, Error, EventSink,
+    HookContext, HookRegistry, Message, MessageId, PluginId, ProjectId, Provider, ProviderEvent,
+    ProviderId, ProviderRegistry, ProviderRequest, Result, Role, RuntimeEvent, SessionId,
+    SessionStore, ToolCallDraft, ToolCallId, ToolContext, ToolExecutionContext, ToolRegistry,
+    ToolServices, TurnId, Workdir,
 };
 
 const MAX_PROVIDER_ROUNDS: usize = 16;
@@ -22,12 +23,14 @@ const MAX_PROVIDER_ROUNDS: usize = 16;
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct SessionSnapshot {
     pub id: SessionId,
+    pub revision: u64,
     pub messages: Vec<Message>,
     pub active_turn: Option<TurnId>,
+    pub active_command: Option<CommandId>,
     pub last_error: Option<String>,
 }
 
-enum Command {
+enum SessionRequest {
     Send {
         message: Message,
         reply: oneshot::Sender<Result<TurnId>>,
@@ -35,12 +38,34 @@ enum Command {
     Cancel {
         reply: oneshot::Sender<bool>,
     },
+    DispatchCommand {
+        invocation: CommandInvocation,
+        reply: oneshot::Sender<Result<CommandResult>>,
+    },
+    HistorySnapshot {
+        reply: oneshot::Sender<HistorySnapshot>,
+    },
+    ReplaceHistory {
+        operation: HistoryOperation,
+        expected_revision: u64,
+        reply: oneshot::Sender<Result<HistorySnapshot>>,
+    },
     Close,
 }
 
 struct TurnFinished {
     id: TurnId,
     result: Result<()>,
+}
+
+struct PreparationFinished {
+    result: Result<Message>,
+}
+
+struct CommandFinished {
+    id: CommandId,
+    result: Result<CommandResult>,
+    reply: oneshot::Sender<Result<CommandResult>>,
 }
 
 struct TurnUpdate {
@@ -52,7 +77,7 @@ enum TurnUpdateKind {
     Provider(ProviderEvent),
     Message {
         message: Message,
-        reply: oneshot::Sender<Result<()>>,
+        reply: oneshot::Sender<Result<HistorySnapshot>>,
     },
 }
 
@@ -62,10 +87,135 @@ struct ActiveTurn {
     task: JoinHandle<()>,
 }
 
+struct ActivePreparation {
+    cancellation: CancellationToken,
+    task: JoinHandle<()>,
+    reply: oneshot::Sender<Result<TurnId>>,
+}
+
+struct ActiveCommand {
+    id: CommandId,
+    cancellation: CancellationToken,
+    task: JoinHandle<()>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct HistorySnapshot {
+    pub revision: u64,
+    pub messages: Vec<Message>,
+}
+
+enum HistoryOperation {
+    ReplaceRange {
+        first: MessageId,
+        last: MessageId,
+        replacement: Vec<Message>,
+    },
+    TruncateBefore(MessageId),
+    TruncateAfter(MessageId),
+}
+
+#[derive(Clone)]
+pub struct SessionHistory {
+    session_id: SessionId,
+    requests: mpsc::Sender<SessionRequest>,
+}
+
+impl SessionHistory {
+    pub(crate) fn closed(session_id: SessionId) -> Self {
+        let (requests, request_rx) = mpsc::channel(1);
+        drop(request_rx);
+        Self {
+            session_id,
+            requests,
+        }
+    }
+
+    pub fn session_id(&self) -> SessionId {
+        self.session_id
+    }
+
+    pub async fn snapshot(&self) -> Result<HistorySnapshot> {
+        let (reply, response) = oneshot::channel();
+        self.requests
+            .send(SessionRequest::HistorySnapshot { reply })
+            .await
+            .map_err(|_| Error::SessionClosed)?;
+        response.await.map_err(|_| Error::ChannelClosed)
+    }
+
+    pub async fn replace_range(
+        &self,
+        expected_revision: u64,
+        first: MessageId,
+        last: MessageId,
+        replacement: Vec<Message>,
+    ) -> Result<HistorySnapshot> {
+        self.replace(
+            expected_revision,
+            HistoryOperation::ReplaceRange {
+                first,
+                last,
+                replacement,
+            },
+        )
+        .await
+    }
+
+    pub async fn replace_messages(
+        &self,
+        expected_revision: u64,
+        first: MessageId,
+        last: MessageId,
+        replacement: Vec<Message>,
+    ) -> Result<HistorySnapshot> {
+        self.replace_range(expected_revision, first, last, replacement)
+            .await
+    }
+
+    pub async fn truncate_before(
+        &self,
+        expected_revision: u64,
+        anchor: MessageId,
+    ) -> Result<HistorySnapshot> {
+        self.replace(expected_revision, HistoryOperation::TruncateBefore(anchor))
+            .await
+    }
+
+    pub async fn truncate_after(
+        &self,
+        expected_revision: u64,
+        anchor: MessageId,
+    ) -> Result<HistorySnapshot> {
+        self.replace(expected_revision, HistoryOperation::TruncateAfter(anchor))
+            .await
+    }
+
+    async fn replace(
+        &self,
+        expected_revision: u64,
+        operation: HistoryOperation,
+    ) -> Result<HistorySnapshot> {
+        let (reply, response) = oneshot::channel();
+        self.requests
+            .send(SessionRequest::ReplaceHistory {
+                operation,
+                expected_revision,
+                reply,
+            })
+            .await
+            .map_err(|_| Error::SessionClosed)?;
+        response.await.map_err(|_| Error::ChannelClosed)?
+    }
+}
+
 #[derive(Clone)]
 pub struct Session {
     id: SessionId,
-    commands: mpsc::Sender<Command>,
+    requests: mpsc::Sender<SessionRequest>,
+    command_registry: CommandRegistry,
+    hook_context: HookContext,
+    workdir: Arc<dyn Workdir>,
     snapshot: watch::Receiver<SessionSnapshot>,
     cancellation: CancellationToken,
 }
@@ -78,6 +228,7 @@ pub(crate) struct SessionSpawn {
     pub model: String,
     pub hooks: HookRegistry,
     pub tools: ToolRegistry,
+    pub commands: CommandRegistry,
     pub providers: ProviderRegistry,
     pub workdir: Arc<dyn Workdir>,
     pub core: Core,
@@ -95,6 +246,7 @@ impl Session {
             model,
             hooks,
             tools,
+            commands: command_registry,
             providers,
             workdir,
             core,
@@ -107,13 +259,32 @@ impl Session {
         };
         let initial = SessionSnapshot {
             id,
+            revision: 0,
             messages,
             active_turn: None,
+            active_command: None,
             last_error: None,
         };
         let (snapshot_tx, snapshot) = watch::channel(initial);
-        let (commands, command_rx) = mpsc::channel(32);
+        let (requests, request_rx) = mpsc::channel(32);
+        let history = SessionHistory {
+            session_id: id,
+            requests: requests.clone(),
+        };
+        let hook_services = super::install_hook_services(
+            id,
+            history,
+            providers.clone(),
+            provider_id.clone(),
+            model.clone(),
+            cancellation.clone(),
+        );
+        let hook_context = HookContext {
+            project_id,
+            session_id: id,
+        };
         let actor_cancellation = cancellation.clone();
+        let session_workdir = workdir.clone();
         tokio::spawn(run_actor(Actor {
             id,
             project_id,
@@ -122,18 +293,25 @@ impl Session {
             model,
             hooks,
             tools,
+            commands: command_registry.clone(),
             providers,
             workdir,
             core,
             store,
             cancellation: actor_cancellation,
-            command_rx,
+            request_rx,
             snapshot_tx,
             active: None,
+            active_preparation: None,
+            active_command: None,
+            hook_services,
         }));
         Ok(Self {
             id,
-            commands,
+            requests,
+            command_registry,
+            hook_context,
+            workdir: session_workdir,
             snapshot,
             cancellation,
         })
@@ -157,8 +335,8 @@ impl Session {
 
     pub async fn send_message(&self, message: Message) -> Result<TurnId> {
         let (reply, response) = oneshot::channel();
-        self.commands
-            .send(Command::Send { message, reply })
+        self.requests
+            .send(SessionRequest::Send { message, reply })
             .await
             .map_err(|_| Error::SessionClosed)?;
         response.await.map_err(|_| Error::ChannelClosed)?
@@ -170,16 +348,68 @@ impl Session {
 
     pub async fn cancel_turn(&self) -> Result<bool> {
         let (reply, response) = oneshot::channel();
-        self.commands
-            .send(Command::Cancel { reply })
+        self.requests
+            .send(SessionRequest::Cancel { reply })
             .await
             .map_err(|_| Error::SessionClosed)?;
         response.await.map_err(|_| Error::ChannelClosed)
     }
 
+    pub async fn cancel_command(&self) -> Result<bool> {
+        self.cancel_turn().await
+    }
+
+    pub async fn cancel_active(&self) -> Result<bool> {
+        self.cancel_turn().await
+    }
+
+    pub fn command_descriptors(&self) -> Vec<super::CommandDescriptor> {
+        self.command_registry.descriptors()
+    }
+
+    pub fn commands(&self) -> Vec<super::CommandDescriptor> {
+        self.command_descriptors()
+    }
+
+    pub fn history(&self) -> SessionHistory {
+        SessionHistory {
+            session_id: self.id,
+            requests: self.requests.clone(),
+        }
+    }
+
+    pub async fn complete_command(
+        &self,
+        invocation: CommandInvocation,
+    ) -> Result<Vec<CommandCompletion>> {
+        let command = self
+            .command_registry
+            .get_by_name(&invocation.name)
+            .ok_or_else(|| Error::CommandNotFound(invocation.name.clone()))?;
+        command
+            .complete(
+                &CommandContext {
+                    hook_context: self.hook_context.clone(),
+                    workdir: self.workdir.clone(),
+                    cancellation: self.cancellation.child_token(),
+                },
+                &invocation,
+            )
+            .await
+    }
+
+    pub async fn dispatch_command(&self, invocation: CommandInvocation) -> Result<CommandResult> {
+        let (reply, response) = oneshot::channel();
+        self.requests
+            .send(SessionRequest::DispatchCommand { invocation, reply })
+            .await
+            .map_err(|_| Error::SessionClosed)?;
+        response.await.map_err(|_| Error::ChannelClosed)?
+    }
+
     pub async fn close(&self) -> Result<()> {
-        self.commands
-            .send(Command::Close)
+        self.requests
+            .send(SessionRequest::Close)
             .await
             .map_err(|_| Error::SessionClosed)
     }
@@ -197,36 +427,71 @@ struct Actor {
     model: String,
     hooks: HookRegistry,
     tools: ToolRegistry,
+    commands: CommandRegistry,
     providers: ProviderRegistry,
     workdir: Arc<dyn Workdir>,
     core: Core,
     store: Option<Arc<dyn SessionStore>>,
     cancellation: CancellationToken,
-    command_rx: mpsc::Receiver<Command>,
+    request_rx: mpsc::Receiver<SessionRequest>,
     snapshot_tx: watch::Sender<SessionSnapshot>,
     active: Option<ActiveTurn>,
+    active_preparation: Option<ActivePreparation>,
+    active_command: Option<ActiveCommand>,
+    hook_services: super::HookServicesRegistration,
 }
 
 async fn run_actor(mut actor: Actor) {
+    let (preparation_finished_tx, mut preparation_finished_rx) =
+        mpsc::channel::<PreparationFinished>(1);
     let (finished_tx, mut finished_rx) = mpsc::channel::<TurnFinished>(1);
+    let (command_finished_tx, mut command_finished_rx) = mpsc::channel::<CommandFinished>(1);
     let (update_tx, mut update_rx) = mpsc::channel::<TurnUpdate>(32);
     loop {
         tokio::select! {
             _ = actor.cancellation.cancelled() => break,
+            Some(finished) = preparation_finished_rx.recv() => {
+                actor.finish_preparation(finished, finished_tx.clone(), update_tx.clone()).await;
+            }
             Some(finished) = finished_rx.recv() => actor.finish_turn(finished).await,
+            Some(finished) = command_finished_rx.recv() => actor.finish_command(finished).await,
             Some(update) = update_rx.recv() => actor.apply_turn_update(update).await,
-            command = actor.command_rx.recv() => match command {
-                Some(Command::Send { message, reply }) => {
-                    let result = actor.start_turn(message, finished_tx.clone(), update_tx.clone()).await;
-                    let _ = reply.send(result);
+            request = actor.request_rx.recv() => match request {
+                Some(SessionRequest::Send { message, reply }) => {
+                    actor.start_preparation(message, reply, preparation_finished_tx.clone());
                 }
-                Some(Command::Cancel { reply }) => {
-                    let cancelled = actor.active.as_ref().map(|active| { active.cancellation.cancel(); true }).unwrap_or(false);
+                Some(SessionRequest::Cancel { reply }) => {
+                    let cancelled = if let Some(active) = actor.active_preparation.as_ref() {
+                        active.cancellation.cancel();
+                        true
+                    } else if let Some(active) = actor.active.as_ref() {
+                        active.cancellation.cancel();
+                        true
+                    } else if let Some(active) = actor.active_command.as_ref() {
+                        active.cancellation.cancel();
+                        true
+                    } else {
+                        false
+                    };
                     let _ = reply.send(cancelled);
                 }
-                Some(Command::Close) | None => break,
+                Some(SessionRequest::DispatchCommand { invocation, reply }) => {
+                    actor.start_command(invocation, reply, command_finished_tx.clone()).await;
+                }
+                Some(SessionRequest::HistorySnapshot { reply }) => {
+                    let _ = reply.send(actor.history_snapshot());
+                }
+                Some(SessionRequest::ReplaceHistory { operation, expected_revision, reply }) => {
+                    let _ = reply.send(actor.replace_history(expected_revision, operation).await);
+                }
+                Some(SessionRequest::Close) | None => break,
             }
         }
+    }
+    if let Some(active) = actor.active_preparation.take() {
+        active.cancellation.cancel();
+        active.task.abort();
+        let _ = active.reply.send(Err(Error::SessionClosed));
     }
     if let Some(active) = actor.active.take() {
         active.cancellation.cancel();
@@ -239,36 +504,95 @@ async fn run_actor(mut actor: Actor) {
             })
             .await;
     }
+    if let Some(active) = actor.active_command.take() {
+        active.cancellation.cancel();
+        active.task.abort();
+        actor.update_snapshot(|snapshot| snapshot.active_command = None);
+        actor
+            .notify(RuntimeEvent::CommandCancelled {
+                session_id: actor.id,
+                command_id: active.id,
+            })
+            .await;
+    }
     actor.cancellation.cancel();
+    super::uninstall_hook_services(actor.id, &actor.hook_services);
 }
 
 impl Actor {
-    async fn start_turn(
+    fn start_preparation(
         &mut self,
         mut message: Message,
-        finished_tx: mpsc::Sender<TurnFinished>,
-        update_tx: mpsc::Sender<TurnUpdate>,
-    ) -> Result<TurnId> {
-        if self.active.is_some() {
-            return Err(Error::SessionBusy);
+        reply: oneshot::Sender<Result<TurnId>>,
+        finished_tx: mpsc::Sender<PreparationFinished>,
+    ) {
+        if self.active_preparation.is_some()
+            || self.active.is_some()
+            || self.active_command.is_some()
+        {
+            let _ = reply.send(Err(Error::SessionBusy));
+            return;
         }
         if self.cancellation.is_cancelled() {
-            return Err(Error::SessionClosed);
+            let _ = reply.send(Err(Error::SessionClosed));
+            return;
         }
+        let cancellation = self.cancellation.child_token();
+        super::set_hook_cancellation(self.id, cancellation.clone());
+        let task_cancellation = cancellation.clone();
+        let hooks = self.hooks.clone();
         let hook_context = HookContext {
             project_id: self.project_id,
             session_id: self.id,
         };
-        if let BeforeHookResult::Cancel { reason } = self
-            .hooks
-            .before_user_message(&hook_context, &mut message)
-            .await?
-        {
-            return Err(Error::HookCancelled(reason));
+        let task = tokio::spawn(async move {
+            let result = tokio::select! {
+                _ = task_cancellation.cancelled() => Err(Error::Cancelled),
+                result = hooks.before_user_message(&hook_context, &mut message) => match result {
+                    Ok(BeforeHookResult::Continue) => Ok(message),
+                    Ok(BeforeHookResult::Cancel { reason }) => Err(Error::HookCancelled(reason)),
+                    Err(error) => Err(error),
+                },
+            };
+            let _ = finished_tx.send(PreparationFinished { result }).await;
+        });
+        self.active_preparation = Some(ActivePreparation {
+            cancellation,
+            task,
+            reply,
+        });
+    }
+
+    async fn finish_preparation(
+        &mut self,
+        finished: PreparationFinished,
+        finished_tx: mpsc::Sender<TurnFinished>,
+        update_tx: mpsc::Sender<TurnUpdate>,
+    ) {
+        let Some(active) = self.active_preparation.take() else {
+            return;
+        };
+        super::set_hook_cancellation(self.id, self.cancellation.child_token());
+        let result = match finished.result {
+            Ok(message) => self.start_turn(message, finished_tx, update_tx).await,
+            Err(error) => Err(error),
+        };
+        let _ = active.reply.send(result);
+    }
+
+    async fn start_turn(
+        &mut self,
+        message: Message,
+        finished_tx: mpsc::Sender<TurnFinished>,
+        update_tx: mpsc::Sender<TurnUpdate>,
+    ) -> Result<TurnId> {
+        if self.cancellation.is_cancelled() {
+            return Err(Error::SessionClosed);
         }
+        let cancellation = self.cancellation.child_token();
+        super::set_hook_cancellation(self.id, cancellation.clone());
         self.persist_and_add(message.clone()).await?;
         let id = TurnId::new();
-        let cancellation = self.cancellation.child_token();
         let provider = self.provider.clone();
         let provider_id = self.provider_id.clone();
         let model = self.model.clone();
@@ -320,11 +644,110 @@ impl Actor {
         Ok(id)
     }
 
+    async fn start_command(
+        &mut self,
+        invocation: CommandInvocation,
+        reply: oneshot::Sender<Result<CommandResult>>,
+        finished_tx: mpsc::Sender<CommandFinished>,
+    ) {
+        if self.active_preparation.is_some()
+            || self.active.is_some()
+            || self.active_command.is_some()
+        {
+            let _ = reply.send(Err(Error::SessionBusy));
+            return;
+        }
+        if self.cancellation.is_cancelled() {
+            let _ = reply.send(Err(Error::SessionClosed));
+            return;
+        }
+        let Some(id) = self.commands.id_by_name(&invocation.name) else {
+            let _ = reply.send(Err(Error::CommandNotFound(invocation.name)));
+            return;
+        };
+        let command = self
+            .commands
+            .get(&id)
+            .expect("command id came from registry");
+        let cancellation = self.cancellation.child_token();
+        super::set_hook_cancellation(self.id, cancellation.clone());
+        let task_cancellation = cancellation.clone();
+        let context = CommandContext {
+            hook_context: HookContext {
+                project_id: self.project_id,
+                session_id: self.id,
+            },
+            workdir: self.workdir.clone(),
+            cancellation: task_cancellation.clone(),
+        };
+        let task_id = id.clone();
+        let task = tokio::spawn(async move {
+            let result = tokio::select! {
+                _ = task_cancellation.cancelled() => Err(Error::Cancelled),
+                result = command.execute(invocation, context) => result,
+            };
+            let finished = CommandFinished {
+                id: task_id,
+                result,
+                reply,
+            };
+            if let Err(error) = finished_tx.send(finished).await {
+                let finished = error.0;
+                let _ = finished.reply.send(finished.result);
+            }
+        });
+        self.active_command = Some(ActiveCommand {
+            id: id.clone(),
+            cancellation,
+            task,
+        });
+        self.update_snapshot(|snapshot| {
+            snapshot.active_command = Some(id.clone());
+            snapshot.last_error = None;
+        });
+        self.notify(RuntimeEvent::CommandStarted {
+            session_id: self.id,
+            command_id: id,
+        })
+        .await;
+    }
+
+    async fn finish_command(&mut self, finished: CommandFinished) {
+        if self.active_command.as_ref().map(|active| &active.id) != Some(&finished.id) {
+            return;
+        }
+        self.active_command.take();
+        super::set_hook_cancellation(self.id, self.cancellation.child_token());
+        self.update_snapshot(|snapshot| snapshot.active_command = None);
+        let event = match &finished.result {
+            Ok(_) => RuntimeEvent::CommandCompleted {
+                session_id: self.id,
+                command_id: finished.id.clone(),
+            },
+            Err(Error::Cancelled) => RuntimeEvent::CommandCancelled {
+                session_id: self.id,
+                command_id: finished.id.clone(),
+            },
+            Err(error) => {
+                let text = error.to_string();
+                self.update_snapshot(|snapshot| snapshot.last_error = Some(text.clone()));
+                RuntimeEvent::CommandFailed {
+                    session_id: self.id,
+                    command_id: finished.id.clone(),
+                    error: text,
+                }
+            }
+        };
+        self.notify(event).await;
+        let _ = finished.reply.send(finished.result);
+    }
+
     async fn finish_turn(&mut self, finished: TurnFinished) {
         if self.active.as_ref().map(|active| active.id) != Some(finished.id) {
             return;
         }
         self.active.take();
+        super::set_hook_cancellation(self.id, self.cancellation.child_token());
         match finished.result {
             Ok(()) => {
                 self.update_snapshot(|snapshot| snapshot.active_turn = None);
@@ -379,17 +802,92 @@ impl Actor {
         .await;
     }
 
-    async fn persist_and_add(&self, message: Message) -> Result<()> {
+    async fn persist_and_add(&self, message: Message) -> Result<HistorySnapshot> {
         if let Some(store) = &self.store {
             store.append_message(self.id, &message).await?;
         }
-        self.update_snapshot(|snapshot| snapshot.messages.push(message.clone()));
+        self.update_snapshot(|snapshot| {
+            snapshot.messages.push(message.clone());
+            snapshot.revision += 1;
+        });
         self.notify(RuntimeEvent::MessageAdded {
             session_id: self.id,
             message,
         })
         .await;
-        Ok(())
+        Ok(self.history_snapshot())
+    }
+
+    fn history_snapshot(&self) -> HistorySnapshot {
+        let snapshot = self.snapshot_tx.borrow();
+        HistorySnapshot {
+            revision: snapshot.revision,
+            messages: snapshot.messages.clone(),
+        }
+    }
+
+    async fn replace_history(
+        &self,
+        expected_revision: u64,
+        operation: HistoryOperation,
+    ) -> Result<HistorySnapshot> {
+        let current = self.history_snapshot();
+        if current.revision != expected_revision {
+            return Err(Error::HistoryRevisionMismatch {
+                expected: expected_revision,
+                actual: current.revision,
+            });
+        }
+        let mut messages = current.messages;
+        match operation {
+            HistoryOperation::ReplaceRange {
+                first,
+                last,
+                replacement,
+            } => {
+                let start = messages
+                    .iter()
+                    .position(|message| message.id == first)
+                    .ok_or(Error::MessageNotFound(first))?;
+                let end = messages
+                    .iter()
+                    .position(|message| message.id == last)
+                    .ok_or(Error::MessageNotFound(last))?;
+                if start > end {
+                    return Err(Error::InvalidMessageRange);
+                }
+                messages.splice(start..=end, replacement);
+            }
+            HistoryOperation::TruncateBefore(anchor) => {
+                let index = messages
+                    .iter()
+                    .position(|message| message.id == anchor)
+                    .ok_or(Error::MessageNotFound(anchor))?;
+                messages.drain(..index);
+            }
+            HistoryOperation::TruncateAfter(anchor) => {
+                let index = messages
+                    .iter()
+                    .position(|message| message.id == anchor)
+                    .ok_or(Error::MessageNotFound(anchor))?;
+                messages.truncate(index + 1);
+            }
+        }
+        if let Some(store) = &self.store {
+            store.replace_messages(self.id, &messages).await?;
+        }
+        let revision = current.revision + 1;
+        self.update_snapshot(|snapshot| {
+            snapshot.messages = messages.clone();
+            snapshot.revision = revision;
+        });
+        self.notify(RuntimeEvent::HistoryReplaced {
+            session_id: self.id,
+            revision,
+            messages: messages.clone(),
+        })
+        .await;
+        Ok(HistorySnapshot { revision, messages })
     }
 
     fn update_snapshot(&self, update: impl FnOnce(&mut SessionSnapshot)) {
@@ -520,17 +1018,24 @@ async fn run_turn(
             .contribute_context(&hook_context, workdir.clone(), &mut context)
             .await?;
         let mut request = ProviderRequest {
+            mode: super::ProviderMode::Normal,
             model: model.clone(),
             messages: messages.clone(),
             tools: definitions.clone(),
             context,
             cancellation: cancellation.clone(),
         };
+        let history_before_hook = hook_context.history().snapshot().await?.revision;
         if let BeforeHookResult::Cancel { reason } = hooks
             .before_provider_request(&hook_context, &mut request)
             .await?
         {
             return Err(Error::HookCancelled(reason));
+        }
+        let canonical = hook_context.history().snapshot().await?;
+        if canonical.revision != history_before_hook {
+            messages = canonical.messages;
+            request.messages = messages.clone();
         }
         let request_model = request.model.clone();
         let mut stream = tokio::select! {
@@ -556,8 +1061,10 @@ async fn run_turn(
         }
 
         let (assistant_message, calls) = assistant.finish()?;
-        persist_generated(turn_id, assistant_message.clone(), &updates).await?;
-        messages.push(assistant_message);
+        let assistant_message_id = assistant_message.id;
+        messages = persist_generated(turn_id, assistant_message, &updates)
+            .await?
+            .messages;
         if calls.is_empty() {
             return Ok(());
         }
@@ -566,6 +1073,7 @@ async fn run_turn(
             let mut execution_context = ToolExecutionContext {
                 hook_context: hook_context.clone(),
                 turn_id,
+                assistant_message_id,
                 workdir: workdir.clone(),
                 call: ToolCallDraft {
                     id: call_id,
@@ -632,8 +1140,7 @@ async fn run_turn(
                     is_error: output.is_error,
                 }],
             );
-            persist_generated(turn_id, result.clone(), &updates).await?;
-            messages.push(result);
+            messages = persist_generated(turn_id, result, &updates).await?.messages;
         }
     }
     Err(Error::Provider(format!(
@@ -700,7 +1207,7 @@ async fn persist_generated(
     turn_id: TurnId,
     message: Message,
     updates: &mpsc::Sender<TurnUpdate>,
-) -> Result<()> {
+) -> Result<HistorySnapshot> {
     let (reply, response) = oneshot::channel();
     updates
         .send(TurnUpdate {

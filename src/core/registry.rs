@@ -1,12 +1,59 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use super::{
-    BeforeHookResult, Context, Error, Hook, HookContext, HookId, Message, Plugin, PluginId,
-    PluginPriority, Provider, ProviderId, ProviderRequest, Result, RuntimeEvent, SessionStore,
-    SessionStoreContext, SessionStoreFactory, SessionStoreFactoryId, StagedRegistrations, Tool,
-    ToolExecutionContext, ToolId, ToolOutput, Workdir, WorkdirLayer, WorkdirLayerContext,
-    WorkdirLayerId,
+    BeforeHookResult, Command, CommandDescriptor, CommandId, Context, Error, Hook, HookContext,
+    HookId, Message, Plugin, PluginId, PluginPriority, Provider, ProviderId, ProviderRequest,
+    Result, RuntimeEvent, SessionStore, SessionStoreContext, SessionStoreFactory,
+    SessionStoreFactoryId, StagedRegistrations, Tool, ToolExecutionContext, ToolId, ToolOutput,
+    Workdir, WorkdirLayer, WorkdirLayerContext, WorkdirLayerId,
 };
+
+struct CommandEntry {
+    descriptor: CommandDescriptor,
+    registration: Registration,
+    command: Arc<dyn Command>,
+}
+
+#[derive(Clone)]
+pub struct CommandRegistry {
+    by_id: Arc<BTreeMap<CommandId, CommandEntry>>,
+    by_name: Arc<BTreeMap<String, CommandId>>,
+    ordered: Arc<Vec<CommandId>>,
+}
+
+impl CommandRegistry {
+    pub fn get(&self, id: &CommandId) -> Option<Arc<dyn Command>> {
+        self.by_id.get(id).map(|entry| entry.command.clone())
+    }
+
+    pub fn get_by_name(&self, name: &str) -> Option<Arc<dyn Command>> {
+        self.by_name.get(name).and_then(|id| self.get(id))
+    }
+
+    pub fn id_by_name(&self, name: &str) -> Option<CommandId> {
+        self.by_name.get(name).cloned()
+    }
+
+    pub fn ids(&self) -> Vec<CommandId> {
+        self.ordered.as_ref().clone()
+    }
+
+    pub fn descriptors(&self) -> Vec<CommandDescriptor> {
+        self.ordered
+            .iter()
+            .map(|id| self.by_id[id].descriptor.clone())
+            .collect()
+    }
+
+    pub fn registration(&self, id: &CommandId) -> Option<&Registration> {
+        self.by_id.get(id).map(|entry| &entry.registration)
+    }
+
+    pub fn owner(&self, id: &CommandId) -> Option<PluginId> {
+        self.registration(id)
+            .map(|registration| registration.plugin_id.clone())
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Registration {
@@ -230,6 +277,7 @@ impl WorkdirLayerRegistry {
 }
 
 pub(crate) struct RegistryBuilder {
+    commands: BTreeMap<CommandId, CommandEntry>,
     providers: BTreeMap<ProviderId, Entry<dyn Provider>>,
     tools: BTreeMap<ToolId, Entry<dyn Tool>>,
     plugins: BTreeMap<PluginId, Arc<dyn Plugin>>,
@@ -241,6 +289,7 @@ pub(crate) struct RegistryBuilder {
 impl RegistryBuilder {
     pub(crate) fn new() -> Self {
         Self {
+            commands: BTreeMap::new(),
             providers: BTreeMap::new(),
             tools: BTreeMap::new(),
             plugins: BTreeMap::new(),
@@ -279,6 +328,18 @@ impl RegistryBuilder {
         for entry in &staged.tools {
             if self.tools.contains_key(&entry.id) {
                 return Err(Error::DuplicateTool(entry.id.clone()));
+            }
+        }
+        for entry in &staged.commands {
+            if self.commands.contains_key(&entry.id) {
+                return Err(Error::DuplicateCommand(entry.id.clone()));
+            }
+            if self
+                .commands
+                .values()
+                .any(|current| current.descriptor.name == entry.descriptor.name)
+            {
+                return Err(Error::DuplicateCommandName(entry.descriptor.name.clone()));
             }
         }
         for entry in &staged.store_factories {
@@ -351,6 +412,17 @@ impl RegistryBuilder {
                 Entry {
                     registration,
                     value: entry.tool,
+                },
+            );
+        }
+        for entry in staged.commands {
+            let registration = self.registration(&plugin_id, entry.priority);
+            self.commands.insert(
+                entry.id,
+                CommandEntry {
+                    descriptor: entry.descriptor,
+                    registration,
+                    command: entry.command,
                 },
             );
         }
@@ -428,6 +500,7 @@ impl RegistryBuilder {
     pub(crate) fn freeze(
         mut self,
     ) -> (
+        CommandRegistry,
         ProviderRegistry,
         ToolRegistry,
         PluginRegistry,
@@ -443,7 +516,27 @@ impl RegistryBuilder {
         self.hooks.store_factories.sort_by(registration_order);
         self.workdir_layers
             .sort_by(|left, right| registration_cmp(&left.registration, &right.registration));
+        let mut command_entries: Vec<_> = self.commands.iter().collect();
+        command_entries.sort_by(|left, right| {
+            registration_cmp(&left.1.registration, &right.1.registration)
+                .then(left.1.descriptor.name.cmp(&right.1.descriptor.name))
+                .then(left.0.cmp(right.0))
+        });
+        let ordered = command_entries
+            .into_iter()
+            .map(|(id, _)| id.clone())
+            .collect();
+        let by_name = self
+            .commands
+            .iter()
+            .map(|(id, entry)| (entry.descriptor.name.clone(), id.clone()))
+            .collect();
         (
+            CommandRegistry {
+                by_id: Arc::new(self.commands),
+                by_name: Arc::new(by_name),
+                ordered: Arc::new(ordered),
+            },
             ProviderRegistry(Arc::new(self.providers)),
             ToolRegistry(Arc::new(self.tools)),
             PluginRegistry(Arc::new(self.plugins)),

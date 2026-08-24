@@ -12,12 +12,13 @@ use airicode::{
     core::{NativeWorkdir, OpenSession, ProviderEvent, ProviderId, RuntimeEvent, Session},
     plugins::{
         agents_instructions_plugin, approval_plugin, base_instructions_plugin,
-        bubblewrap_sandbox_plugin, compaction_plugin, fork_plugin, grep_plugin,
-        jsonl_persistence_plugin, patch_plugin, revert_plugin, shell_plugin, sidequery_plugin,
-        skills_plugin, subagents_plugin, todo_plugin, webfetch_plugin, AgentsInstructionsConfig,
-        ApprovalPolicy, BubblewrapFileOperation, BubblewrapPathRule, BubblewrapProcessRule,
-        BubblewrapSandboxConfig, CompactionPluginConfig, ForkConfig, JsonlPersistenceConfig,
-        RevertConfig, SideQueryConfig, SkillsConfig, SubagentConfig, WebFetchConfig,
+        bubblewrap_sandbox_plugin, compaction_plugin, fork_plugin, git_worktree_plugin,
+        grep_plugin, jsonl_persistence_plugin, patch_plugin, read_plugin, revert_plugin,
+        shell_plugin, sidequery_plugin, skills_plugin, subagents_plugin, todo_plugin,
+        webfetch_plugin, AgentsInstructionsConfig, ApprovalPolicy, BubblewrapFileOperation,
+        BubblewrapPathRule, BubblewrapProcessRule, BubblewrapSandboxConfig, CompactionPluginConfig,
+        ForkConfig, GitWorktreeConfig, JsonlPersistenceConfig, RevertConfig, SideQueryConfig,
+        SkillsConfig, SubagentConfig, WebFetchConfig,
     },
     providers::{openai_plugin, openrouter_plugin, OpenAiConfig, OpenRouterConfig},
     ui::terminal,
@@ -162,6 +163,7 @@ async fn bootstrap(
     let mut core = Core::new()
         .with_plugin(provider_plugin)
         .with_plugin(grep_plugin())
+        .with_plugin(read_plugin())
         .with_plugin(patch_plugin())
         .with_plugin(shell_plugin())
         .with_plugin(todo_plugin())
@@ -179,6 +181,12 @@ async fn bootstrap(
             reserved_output_tokens: config.compaction.reserved_tokens as usize,
             ..CompactionPluginConfig::default()
         }));
+    }
+    if is_git_project(project) {
+        core = core.with_plugin(git_worktree_plugin(GitWorktreeConfig::new(
+            project,
+            &config.persistence.data_dir,
+        )));
     }
     let skills_dir = project.join(".airicode/skills");
     if skills_dir.is_dir() {
@@ -304,4 +312,16 @@ fn canonical_identity(project: &Path) -> String {
         .unwrap_or_else(|_| project.to_path_buf())
         .to_string_lossy()
         .into_owned()
+}
+
+fn is_git_project(project: &Path) -> bool {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(project)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }

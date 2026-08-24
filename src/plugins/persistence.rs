@@ -201,6 +201,58 @@ impl JsonlSessionStore {
         }
         Ok(())
     }
+
+    fn replace(&self, session_id: SessionId, messages: &[Message]) -> Result<()> {
+        let _guard = self
+            .append_lock
+            .lock()
+            .map_err(|_| Error::Store("JSONL append lock is poisoned".into()))?;
+        let path = self.path_for_session(session_id);
+        let parent = path
+            .parent()
+            .ok_or_else(|| Error::Store(format!("invalid session path {}", path.display())))?;
+        fs::create_dir_all(parent).map_err(|error| store_error(parent, "create", error))?;
+        let temporary = parent.join(format!(".{}.tmp", Uuid::new_v4()));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary)
+                .map_err(|error| store_error(&temporary, "create", error))?;
+            for (index, message) in messages.iter().enumerate() {
+                let record = JsonlRecord {
+                    schema_version: SCHEMA_VERSION,
+                    sequence: index as u64 + 1,
+                    event_id: Uuid::new_v4(),
+                    recorded_at: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
+                    kind: MESSAGE_KIND.into(),
+                    payload: serde_json::to_value(message).map_err(|error| {
+                        Error::Store(format!("serialize replacement message: {error}"))
+                    })?,
+                };
+                let encoded = serde_json::to_vec(&record).map_err(|error| {
+                    Error::Store(format!("serialize replacement JSONL record: {error}"))
+                })?;
+                file.write_all(&encoded)
+                    .and_then(|_| file.write_all(b"\n"))
+                    .map_err(|error| store_error(&temporary, "write", error))?;
+            }
+            file.flush()
+                .map_err(|error| store_error(&temporary, "flush", error))?;
+            if self.fsync {
+                file.sync_data()
+                    .map_err(|error| store_error(&temporary, "fsync", error))?;
+            }
+            fs::rename(&temporary, &path).map_err(|error| store_error(&path, "replace", error))
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(temporary);
+        }
+        result
+    }
 }
 
 #[async_trait]
@@ -211,6 +263,10 @@ impl SessionStore for JsonlSessionStore {
 
     async fn append_message(&self, session_id: SessionId, message: &Message) -> Result<()> {
         self.append(session_id, message)
+    }
+
+    async fn replace_messages(&self, session_id: SessionId, messages: &[Message]) -> Result<()> {
+        self.replace(session_id, messages)
     }
 }
 

@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod config;
 pub mod core;
+pub(crate) mod hashline;
 pub mod plugins;
 pub mod providers;
 pub mod testkit;

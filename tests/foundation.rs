@@ -202,6 +202,101 @@ async fn before_hooks_mutate_input_and_notifications_observe_events() {
         .any(|event| matches!(event, RuntimeEvent::TurnStarted { .. })));
 }
 
+struct ReplacingUserMessagePlugin;
+
+#[async_trait]
+impl Plugin for ReplacingUserMessagePlugin {
+    fn id(&self) -> PluginId {
+        PluginId::from("replacing-user-message")
+    }
+
+    async fn init(self: Arc<Self>, registrar: PluginRegistrar) -> Result<()> {
+        registrar.register_before_user_message("replace-history", 0, self)
+    }
+}
+
+#[async_trait]
+impl BeforeUserMessageHook for ReplacingUserMessagePlugin {
+    async fn before_user_message(
+        &self,
+        context: &HookContext,
+        _message: &mut Message,
+    ) -> Result<BeforeHookResult> {
+        let snapshot = context.history().snapshot().await?;
+        if let Some(first) = snapshot.messages.first() {
+            context
+                .history()
+                .replace_range(
+                    snapshot.revision,
+                    first.id,
+                    first.id,
+                    vec![Message::text(Role::System, "hook replacement")],
+                )
+                .await?;
+        }
+        Ok(BeforeHookResult::Continue)
+    }
+}
+
+#[tokio::test]
+async fn before_user_hook_can_replace_history_without_deadlocking_actor() {
+    let core = Core::new()
+        .with_plugin(stub_provider_plugin(StubProvider::responding(
+            "stub", "answer",
+        )))
+        .with_plugin(Arc::new(ReplacingUserMessagePlugin))
+        .build()
+        .await
+        .unwrap();
+    let session = core
+        .open_project("test", Arc::new(StubWorkdir::new("/tmp")))
+        .open_session(OpenSession {
+            id: None,
+            provider: ProviderId::from("stub"),
+            model: "test".into(),
+        })
+        .await
+        .unwrap();
+
+    timeout(Duration::from_secs(1), session.send_text("first"))
+        .await
+        .unwrap()
+        .unwrap();
+    wait_for_turn(&session).await;
+    timeout(Duration::from_secs(1), session.send_text("second"))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(session.snapshot().messages[0].role, Role::System);
+    assert!(matches!(
+        &session.snapshot().messages[0].content[0],
+        MessagePart::Text { text } if text == "hook replacement"
+    ));
+}
+
+#[tokio::test]
+async fn closed_session_hook_context_returns_session_closed_for_history() {
+    let session = session_with(StubProvider::responding("stub", "answer")).await;
+    let context = HookContext {
+        project_id: ProjectId::new(),
+        session_id: session.id(),
+    };
+
+    session.close().await.unwrap();
+    timeout(Duration::from_secs(1), async {
+        loop {
+            match context.history().snapshot().await {
+                Err(Error::SessionClosed) => break,
+                Err(Error::ChannelClosed) | Ok(_) => tokio::task::yield_now().await,
+                Err(error) => panic!("unexpected history error: {error}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
 struct ScriptedProvider {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
     responses: Mutex<VecDeque<Vec<ProviderEvent>>>,
@@ -586,6 +681,14 @@ impl SessionStore for MemoryStore {
             .entry(session_id)
             .or_default()
             .push(message.clone());
+        Ok(())
+    }
+
+    async fn replace_messages(&self, session_id: SessionId, messages: &[Message]) -> Result<()> {
+        self.messages
+            .lock()
+            .unwrap()
+            .insert(session_id, messages.to_vec());
         Ok(())
     }
 }
@@ -1082,6 +1185,170 @@ async fn open_scripted_session(core: &Core, root: &str) -> Session {
         })
         .await
         .unwrap()
+}
+
+struct HistoryCommand;
+
+#[async_trait]
+impl Command for HistoryCommand {
+    fn id(&self) -> CommandId {
+        CommandId::from("test.history")
+    }
+
+    fn descriptor(&self) -> CommandDescriptor {
+        CommandDescriptor {
+            name: "history".into(),
+            description: "Replace the first message".into(),
+            usage: "/history".into(),
+        }
+    }
+
+    async fn execute(
+        &self,
+        _invocation: CommandInvocation,
+        context: CommandContext,
+    ) -> Result<CommandResult> {
+        let snapshot = context.history().snapshot().await?;
+        let first = snapshot.messages[0].id;
+        context
+            .history()
+            .replace_range(
+                snapshot.revision,
+                first,
+                first,
+                vec![Message::text(Role::System, "command replacement")],
+            )
+            .await?;
+        Ok(CommandResult {
+            content: "replaced".into(),
+        })
+    }
+}
+
+struct CommandPlugin;
+
+#[async_trait]
+impl Plugin for CommandPlugin {
+    fn id(&self) -> PluginId {
+        PluginId::from("commands")
+    }
+
+    async fn init(self: Arc<Self>, registrar: PluginRegistrar) -> Result<()> {
+        registrar.register_command(0, Arc::new(HistoryCommand))
+    }
+}
+
+#[tokio::test]
+async fn commands_can_replace_history_without_deadlocking_the_actor() {
+    let core = Core::new()
+        .with_plugin(stub_provider_plugin(StubProvider::responding(
+            "stub", "answer",
+        )))
+        .with_plugin(Arc::new(CommandPlugin))
+        .build()
+        .await
+        .unwrap();
+    let mut events = core.subscribe();
+    let session = core
+        .open_project("test", Arc::new(StubWorkdir::new("/tmp")))
+        .open_session(OpenSession {
+            id: None,
+            provider: ProviderId::from("stub"),
+            model: "test".into(),
+        })
+        .await
+        .unwrap();
+    session.send_text("question").await.unwrap();
+    wait_for_turn(&session).await;
+
+    assert_eq!(session.commands()[0].name, "history");
+    let output = timeout(
+        Duration::from_secs(1),
+        session.dispatch_command(parse_command_invocation("/history").unwrap()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(output.content, "replaced");
+    assert_eq!(session.snapshot().messages[0].role, Role::System);
+    assert_eq!(session.snapshot().revision, 3);
+    let mut saw_history = false;
+    let mut saw_command = false;
+    while let Ok(event) = events.try_recv() {
+        saw_history |= matches!(event, RuntimeEvent::HistoryReplaced { .. });
+        saw_command |= matches!(event, RuntimeEvent::CommandCompleted { .. });
+    }
+    assert!(saw_history && saw_command);
+}
+
+struct ReplacingProviderHook;
+
+#[async_trait]
+impl BeforeProviderRequestHook for ReplacingProviderHook {
+    async fn before_provider_request(
+        &self,
+        context: &HookContext,
+        _request: &mut ProviderRequest,
+    ) -> Result<BeforeHookResult> {
+        let snapshot = context.history().snapshot().await?;
+        let first = snapshot.messages[0].id;
+        context
+            .history()
+            .replace_range(
+                snapshot.revision,
+                first,
+                first,
+                vec![Message::text(Role::User, "provider replacement")],
+            )
+            .await?;
+        Ok(BeforeHookResult::Continue)
+    }
+}
+
+struct ReplacingProviderPlugin;
+
+#[async_trait]
+impl Plugin for ReplacingProviderPlugin {
+    fn id(&self) -> PluginId {
+        PluginId::from("replace-before-provider")
+    }
+
+    async fn init(self: Arc<Self>, registrar: PluginRegistrar) -> Result<()> {
+        registrar.register_before_provider_request(
+            "replace-history",
+            0,
+            Arc::new(ReplacingProviderHook),
+        )
+    }
+}
+
+#[tokio::test]
+async fn before_provider_history_replacement_resynchronizes_the_request() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let provider = ScriptedProvider {
+        requests: requests.clone(),
+        responses: Mutex::new(VecDeque::from([vec![ProviderEvent::Finished {
+            reason: FinishReason::Stop,
+        }]])),
+    };
+    let core = Core::new()
+        .with_plugin(ServicesPlugin::new(
+            "services",
+            Arc::new(provider),
+            Vec::new(),
+        ))
+        .with_plugin(Arc::new(ReplacingProviderPlugin))
+        .build()
+        .await
+        .unwrap();
+    let session = open_scripted_session(&core, "/provider-history").await;
+
+    session.send_text("original").await.unwrap();
+    wait_for_turn(&session).await;
+    assert!(matches!(
+        &requests.lock().unwrap()[0].messages[0].content[0],
+        MessagePart::Text { text } if text == "provider replacement"
+    ));
 }
 
 fn one_tool_call_provider() -> ScriptedProvider {

@@ -2,22 +2,22 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde::Serialize;
 
 use crate::core::{
+    Command, CommandContext, CommandDescriptor, CommandId, CommandInvocation, CommandResult,
     Context, Error, FinishReason, Message, Plugin, PluginId, PluginRegistrar, ProviderEvent,
-    ProviderRequest, Result, Role, Tool, ToolContext, ToolDefinition, ToolId, ToolOutput, Usage,
+    ProviderMode, ProviderRequest, Result, Role, Usage,
 };
 
 const PLUGIN_ID: &str = "builtin.sidequery";
-const TOOL_ID: &str = "builtin.sidequery.query";
-const TOOL_NAME: &str = "sidequery";
+const COMMAND_ID: &str = "builtin.sidequery.query";
 
 #[derive(Clone, Debug)]
 pub struct SideQueryConfig {
     /// Uses the current turn's model when unset.
     pub model: Option<String>,
+    pub system: Option<String>,
     pub max_output_bytes: usize,
     pub timeout: Duration,
 }
@@ -26,6 +26,7 @@ impl SideQueryConfig {
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             model: Some(model.into()),
+            system: None,
             max_output_bytes: 128 * 1024,
             timeout: Duration::from_secs(60),
         }
@@ -48,25 +49,17 @@ impl Plugin for SideQueryPlugin {
 
     async fn init(self: Arc<Self>, registrar: PluginRegistrar) -> Result<()> {
         validate_config(&self.config)?;
-        registrar.register_tool(
+        registrar.register_command(
             0,
-            Arc::new(SideQueryTool {
+            Arc::new(SideQueryCommand {
                 config: self.config.clone(),
             }),
         )
     }
 }
 
-struct SideQueryTool {
+struct SideQueryCommand {
     config: SideQueryConfig,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SideQueryInput {
-    prompt: String,
-    #[serde(default)]
-    system: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -78,64 +71,62 @@ struct SideQueryOutput {
 }
 
 #[async_trait]
-impl Tool for SideQueryTool {
-    fn id(&self) -> ToolId {
-        ToolId::new(TOOL_ID)
+impl Command for SideQueryCommand {
+    fn id(&self) -> CommandId {
+        CommandId::new(COMMAND_ID)
     }
 
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: TOOL_NAME.into(),
+    fn descriptor(&self) -> CommandDescriptor {
+        CommandDescriptor {
+            name: "sidequery".into(),
             description: "Run an isolated, tool-free provider query. The query cannot modify the current conversation or workdir.".into(),
-            input_schema: json!({
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "prompt": { "type": "string", "minLength": 1 },
-                    "system": { "type": "string" }
-                },
-                "required": ["prompt"]
-            }),
+            usage: "/sidequery <prompt>".into(),
         }
     }
 
-    async fn execute(&self, input: Value, context: ToolContext) -> Result<ToolOutput> {
-        let input: SideQueryInput = serde_json::from_value(input)
-            .map_err(|error| Error::Tool(format!("invalid sidequery input: {error}")))?;
-        if input.prompt.is_empty() {
-            return Err(Error::Tool("sidequery prompt may not be empty".into()));
+    async fn execute(
+        &self,
+        invocation: CommandInvocation,
+        context: CommandContext,
+    ) -> Result<CommandResult> {
+        if invocation.arguments.trim().is_empty() {
+            return Err(Error::Plugin("usage: /sidequery <prompt>".into()));
         }
         if context.cancellation.is_cancelled() {
             return Err(Error::Cancelled);
         }
 
-        let provider_id = context.provider_id().clone();
-        let provider = context.providers().get(&provider_id).ok_or_else(|| {
-            Error::Provider(format!("current provider {provider_id} is not registered"))
-        })?;
+        let provider_id = context.hook_context.provider_id();
+        let provider = context
+            .hook_context
+            .providers()
+            .get(&provider_id)
+            .ok_or_else(|| {
+                Error::Provider(format!("current provider {provider_id} is not registered"))
+            })?;
         let model = self
             .config
             .model
             .as_deref()
-            .unwrap_or_else(|| context.model())
-            .to_owned();
+            .map(str::to_owned)
+            .unwrap_or_else(|| context.hook_context.model());
         if model.trim().is_empty() {
             return Err(Error::Provider("sidequery model may not be empty".into()));
         }
         let cancellation = context.cancellation.child_token();
         let mut messages = Vec::new();
-        if let Some(system) = input.system.filter(|value| !value.is_empty()) {
+        if let Some(system) = self
+            .config
+            .system
+            .as_ref()
+            .filter(|value| !value.is_empty())
+        {
             messages.push(Message::text(Role::System, system));
         }
-        messages.push(Message::text(Role::User, input.prompt));
+        messages.push(Message::text(Role::User, invocation.arguments));
 
-        context
-            .emit_feature(
-                "sidequery.started",
-                json!({ "provider_id": provider_id.as_str(), "model": model }),
-            )
-            .await?;
         let request = ProviderRequest {
+            mode: ProviderMode::SideQuery,
             model: model.clone(),
             messages,
             tools: Vec::new(),
@@ -178,39 +169,11 @@ impl Tool for SideQueryTool {
                 }
             },
         };
-        let output = match result {
-            Ok(output) => output,
-            Err(error) => {
-                let _ = context
-                    .emit_feature(
-                        "sidequery.failed",
-                        json!({
-                            "provider_id": provider_id.as_str(),
-                            "model": model,
-                            "error": error.to_string()
-                        }),
-                    )
-                    .await;
-                return Err(error);
-            }
-        };
-        context
-            .emit_feature(
-                "sidequery.completed",
-                json!({
-                    "provider_id": provider_id.as_str(),
-                    "model": model,
-                    "output_bytes": output.text.len(),
-                    "truncated": output.truncated
-                }),
-            )
-            .await?;
-        let content = serde_json::to_string(&output)
-            .map_err(|error| Error::Tool(format!("could not encode sidequery output: {error}")))?;
-        Ok(ToolOutput {
-            content,
-            is_error: false,
-        })
+        let output = result?;
+        let content = serde_json::to_string(&output).map_err(|error| {
+            Error::Plugin(format!("could not encode sidequery output: {error}"))
+        })?;
+        Ok(CommandResult { content })
     }
 }
 
@@ -246,6 +209,7 @@ fn append_bounded(target: &mut String, value: &str, limit: usize, truncated: &mu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::Core;
 
     #[test]
     fn bounds_utf8_output() {
@@ -256,12 +220,20 @@ mod tests {
         assert!(truncated);
     }
 
-    #[test]
-    fn schema_declares_isolation() {
-        let tool = SideQueryTool {
-            config: SideQueryConfig::new("test"),
-        };
-        assert!(tool.definition().description.contains("tool-free"));
-        assert_eq!(tool.definition().name, TOOL_NAME);
+    #[tokio::test]
+    async fn plugin_registers_only_its_isolated_command() {
+        let core = Core::new()
+            .with_plugin(sidequery_plugin(SideQueryConfig::new("test")))
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(core.commands().ids(), vec![CommandId::new(COMMAND_ID)]);
+        assert!(core.commands().descriptors()[0]
+            .description
+            .contains("tool-free"));
+        assert!(core.tools().ids().is_empty());
+
+        let omitted = Core::new().build().await.unwrap();
+        assert!(omitted.commands().ids().is_empty());
     }
 }

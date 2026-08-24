@@ -2,7 +2,10 @@ use std::{io, path::PathBuf};
 
 use thiserror::Error;
 
-use super::{HookId, PluginId, ProviderId, SessionStoreFactoryId, ToolId, WorkdirLayerId};
+use super::{
+    CommandId, HookId, MessageId, PluginId, ProviderId, SessionStoreFactoryId, ToolId,
+    WorkdirLayerId,
+};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -16,6 +19,14 @@ pub enum Error {
     DuplicateProvider(ProviderId),
     #[error("tool {0} is already registered")]
     DuplicateTool(ToolId),
+    #[error("command {0} is already registered")]
+    DuplicateCommand(CommandId),
+    #[error("command name {0} is already registered")]
+    DuplicateCommandName(String),
+    #[error("invalid command descriptor: {0}")]
+    InvalidCommandDescriptor(String),
+    #[error("command {0} is not registered")]
+    CommandNotFound(String),
     #[error("plugin {0} is already registered")]
     DuplicatePlugin(PluginId),
     #[error("hook {0} is already registered for this hook type")]
@@ -28,6 +39,12 @@ pub enum Error {
     ProviderNotFound(ProviderId),
     #[error("session already has an active turn")]
     SessionBusy,
+    #[error("history revision changed (expected {expected}, actual {actual})")]
+    HistoryRevisionMismatch { expected: u64, actual: u64 },
+    #[error("message {0} is not in session history")]
+    MessageNotFound(MessageId),
+    #[error("invalid message range")]
+    InvalidMessageRange,
     #[error("session is closed")]
     SessionClosed,
     #[error("operation was cancelled")]

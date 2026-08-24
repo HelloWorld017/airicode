@@ -8,6 +8,12 @@ use super::{Message, OpenSession, ProjectId, Result, SessionId, SessionStoreFact
 pub trait SessionStore: Send + Sync {
     async fn load_messages(&self, session_id: SessionId) -> Result<Vec<Message>>;
     async fn append_message(&self, session_id: SessionId, message: &Message) -> Result<()>;
+    async fn replace_messages(&self, session_id: SessionId, messages: &[Message]) -> Result<()> {
+        let _ = (session_id, messages);
+        Err(super::Error::Store(
+            "session store does not support replacing messages".into(),
+        ))
+    }
 }
 
 #[derive(Clone)]

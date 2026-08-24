@@ -61,5 +61,6 @@ async fn empty_core_has_no_plugin_features() {
     assert!(core.plugins().ids().is_empty());
     assert!(core.providers().ids().is_empty());
     assert!(core.tools().ids().is_empty());
+    assert!(core.commands().ids().is_empty());
     assert!(core.workdir_layers().ids().is_empty());
 }

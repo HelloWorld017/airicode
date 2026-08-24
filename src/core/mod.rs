@@ -1,3 +1,4 @@
+mod command;
 mod context;
 mod core_handle;
 mod error;
@@ -13,6 +14,7 @@ mod store;
 mod tool;
 mod workdir;
 
+pub use command::*;
 pub use context::*;
 pub use core_handle::*;
 pub use error::*;

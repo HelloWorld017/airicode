@@ -7,17 +7,18 @@ use std::{
 };
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::core::{
-    AfterToolExecutionHook, BeforeHookResult, BeforeToolExecutionHook, Error, Plugin, PluginId,
-    PluginRegistrar, Result, SessionId, Tool, ToolCallId, ToolContext, ToolDefinition,
-    ToolExecutionContext, ToolId, ToolOutput, Workdir,
+    AfterToolExecutionHook, BeforeHookResult, BeforeToolExecutionHook, Command, CommandContext,
+    CommandDescriptor, CommandId, CommandInvocation, CommandResult, Error, MessageId, MessagePart,
+    Plugin, PluginId, PluginRegistrar, Result, SessionId, ToolCallId, ToolExecutionContext,
+    ToolOutput, Workdir,
 };
 
 const PLUGIN_ID: &str = "builtin.revert";
-const TOOL_ID: &str = "builtin.revert";
+const COMMAND_ID: &str = "builtin.revert";
 const BEFORE_HOOK_ID: &str = "builtin.revert.capture-preimages";
 const AFTER_HOOK_ID: &str = "builtin.revert.capture-postimages";
 
@@ -65,7 +66,7 @@ impl Plugin for RevertPlugin {
         });
         registrar.register_before_tool_execution(BEFORE_HOOK_ID, 0, service.clone())?;
         registrar.register_after_tool_execution(AFTER_HOOK_ID, 0, service.clone())?;
-        registrar.register_tool(0, service)
+        registrar.register_command(0, service)
     }
 }
 
@@ -88,6 +89,8 @@ struct FileState {
 
 struct RevertCapture {
     workdir: Arc<dyn Workdir>,
+    assistant_message_id: MessageId,
+    history_anchor: Option<MessageId>,
     paths: Vec<PathBuf>,
     preimages: Vec<FileState>,
 }
@@ -104,14 +107,9 @@ struct RevertRecord {
     id: Uuid,
     tool_name: String,
     recorded_at_ms: u64,
+    assistant_message_id: MessageId,
+    history_anchor: Option<MessageId>,
     entries: Vec<RevertEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RevertInput {
-    #[serde(default)]
-    record_id: Option<Uuid>,
 }
 
 #[derive(Default, Serialize)]
@@ -127,13 +125,35 @@ impl BeforeToolExecutionHook for RevertService {
         &self,
         context: &mut ToolExecutionContext,
     ) -> Result<BeforeHookResult> {
-        if context.call.name == "revert" {
-            return Ok(BeforeHookResult::Continue);
-        }
         let paths = explicit_paths(&context.call.arguments)?;
         if paths.is_empty() {
             return Ok(BeforeHookResult::Continue);
         }
+
+        let history = context.hook_context.history().snapshot().await?;
+        let assistant_index = history
+            .messages
+            .iter()
+            .position(|message| message.id == context.assistant_message_id)
+            .ok_or_else(|| {
+                Error::Plugin(format!(
+                    "could not locate assistant message {} for revert capture",
+                    context.assistant_message_id
+                ))
+            })?;
+        if !history.messages[assistant_index]
+            .content
+            .iter()
+            .any(|part| matches!(part, MessagePart::ToolCall { id, .. } if id == &context.call.id))
+        {
+            return Err(Error::Plugin(format!(
+                "assistant message {} does not contain tool call {}",
+                context.assistant_message_id, context.call.id
+            )));
+        }
+        let history_anchor = assistant_index
+            .checked_sub(1)
+            .map(|index| history.messages[index].id);
 
         let mut captured_paths = Vec::new();
         let mut preimages = Vec::new();
@@ -156,6 +176,8 @@ impl BeforeToolExecutionHook for RevertService {
                 (context.hook_context.session_id, context.call.id.clone()),
                 RevertCapture {
                     workdir: context.workdir.clone(),
+                    assistant_message_id: context.assistant_message_id,
+                    history_anchor,
                     paths: captured_paths,
                     preimages,
                 },
@@ -203,6 +225,8 @@ impl AfterToolExecutionHook for RevertService {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64,
+            assistant_message_id: capture.assistant_message_id,
+            history_anchor: capture.history_anchor,
             entries,
         };
         let mut state = self.state.lock().expect("revert state lock poisoned");
@@ -219,45 +243,85 @@ impl AfterToolExecutionHook for RevertService {
 }
 
 #[async_trait]
-impl Tool for RevertService {
-    fn id(&self) -> ToolId {
-        ToolId::new(TOOL_ID)
+impl Command for RevertService {
+    fn id(&self) -> CommandId {
+        CommandId::new(COMMAND_ID)
     }
 
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
+    fn descriptor(&self) -> CommandDescriptor {
+        CommandDescriptor {
             name: "revert".into(),
             description:
                 "Restore files changed by a previous tool call when they have not changed again."
                     .into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "record_id": {
-                        "type": "string",
-                        "description": "Operation record to restore; omit to restore the latest operation in this session."
-                    }
-                }
-            }),
+            usage: "/revert [record-id]".into(),
         }
     }
 
-    async fn execute(&self, input: serde_json::Value, context: ToolContext) -> Result<ToolOutput> {
-        let input: RevertInput = serde_json::from_value(input)
-            .map_err(|error| Error::Tool(format!("invalid revert input: {error}")))?;
+    async fn execute(
+        &self,
+        invocation: CommandInvocation,
+        context: CommandContext,
+    ) -> Result<CommandResult> {
+        let record_id = parse_optional_record_id(&invocation.arguments)?;
         let record = {
             let state = self.state.lock().expect("revert state lock poisoned");
-            let records = state.records.get(&context.session_id).ok_or_else(|| {
-                Error::Tool("this session has no recorded file changes to revert".into())
-            })?;
-            match input.record_id {
+            let records = state
+                .records
+                .get(&context.hook_context.session_id)
+                .ok_or_else(|| {
+                    Error::Plugin("this session has no recorded file changes to revert".into())
+                })?;
+            match record_id {
                 Some(id) => records.iter().find(|record| record.id == id),
                 None => records.last(),
             }
             .cloned()
-            .ok_or_else(|| Error::Tool("revert record was not found in this session".into()))?
+            .ok_or_else(|| Error::Plugin("revert record was not found in this session".into()))?
         };
+
+        let history = context.history();
+        let snapshot = history.snapshot().await?;
+        let assistant_index = snapshot
+            .messages
+            .iter()
+            .position(|message| message.id == record.assistant_message_id)
+            .ok_or_else(|| {
+                Error::Plugin(format!(
+                    "cannot revert record {}: its assistant message is no longer in canonical history",
+                    record.id
+                ))
+            })?;
+        match record.history_anchor {
+            Some(anchor) => {
+                if assistant_index == 0 || snapshot.messages[assistant_index - 1].id != anchor {
+                    return Err(Error::Plugin(format!(
+                        "cannot revert record {}: its canonical history anchor changed",
+                        record.id
+                    )));
+                }
+                history.truncate_after(snapshot.revision, anchor).await?;
+            }
+            None => {
+                if assistant_index != 0 {
+                    return Err(Error::Plugin(format!(
+                        "cannot revert record {} without its original history anchor",
+                        record.id
+                    )));
+                }
+                let last = snapshot.messages.last().ok_or_else(|| {
+                    Error::Plugin("cannot clear an empty canonical history".into())
+                })?;
+                history
+                    .replace_range(
+                        snapshot.revision,
+                        record.assistant_message_id,
+                        last.id,
+                        Vec::new(),
+                    )
+                    .await?;
+            }
+        }
 
         let mut outcome = RevertOutcome {
             record_id: Some(record.id),
@@ -279,15 +343,28 @@ impl Tool for RevertService {
             .lock()
             .expect("revert state lock poisoned")
             .records
-            .get_mut(&context.session_id)
+            .get_mut(&context.hook_context.session_id)
             .expect("selected revert record disappeared")
             .retain(|candidate| candidate.id != record.id);
-        Ok(ToolOutput {
-            content: serde_json::to_string(&outcome)
-                .map_err(|error| Error::Tool(format!("could not encode revert result: {error}")))?,
-            is_error: false,
+        Ok(CommandResult {
+            content: serde_json::to_string(&outcome).map_err(|error| {
+                Error::Plugin(format!("could not encode revert result: {error}"))
+            })?,
         })
     }
+}
+
+fn parse_optional_record_id(arguments: &str) -> Result<Option<Uuid>> {
+    let argument = arguments.trim();
+    if argument.is_empty() {
+        return Ok(None);
+    }
+    if argument.split_whitespace().count() != 1 {
+        return Err(Error::Plugin("usage: /revert [record-id]".into()));
+    }
+    Uuid::parse_str(argument)
+        .map(Some)
+        .map_err(|_| Error::Plugin(format!("invalid revert record id: {argument}")))
 }
 
 fn explicit_paths(arguments: &serde_json::Value) -> Result<Vec<PathBuf>> {
@@ -379,6 +456,7 @@ mod tests {
                 session_id,
             },
             turn_id: TurnId::new(),
+            assistant_message_id: crate::core::MessageId::new(),
             workdir,
             call: crate::core::ToolCallDraft {
                 id: ToolCallId::new(id),
@@ -389,14 +467,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plugin_registers_tool_and_both_hooks() {
+    async fn plugin_registers_command_and_both_hooks() {
         let core = Core::new()
             .with_plugin(revert_plugin(RevertConfig::default()))
             .build()
             .await
             .unwrap();
-        assert_eq!(core.tools().ids(), vec![ToolId::new(TOOL_ID)]);
+        assert_eq!(core.commands().ids(), vec![CommandId::new(COMMAND_ID)]);
+        assert_eq!(
+            core.commands().descriptors()[0].usage,
+            "/revert [record-id]"
+        );
+        assert!(core.tools().ids().is_empty());
         assert!(core.workdir_layers().ids().is_empty());
+
+        let omitted = Core::new().build().await.unwrap();
+        assert!(omitted.commands().ids().is_empty());
     }
 
     #[test]
@@ -425,13 +511,27 @@ mod tests {
             state: Arc::new(Mutex::new(RevertState::default())),
         };
         let session_id = SessionId::new();
-        let mut execution = execution_context(
+        let execution = execution_context(
             session_id,
             workdir.clone(),
             "call",
             serde_json::json!({"paths": ["changed.txt", "created.txt", "conflict.txt"]}),
         );
-        service.before_tool_execution(&mut execution).await.unwrap();
+        let paths = explicit_paths(&execution.call.arguments).unwrap();
+        let mut preimages = Vec::new();
+        for path in &paths {
+            preimages.push(read_state(workdir.as_ref(), path).await.unwrap());
+        }
+        service.state.lock().unwrap().pending.insert(
+            (session_id, execution.call.id.clone()),
+            RevertCapture {
+                workdir: workdir.clone(),
+                assistant_message_id: execution.assistant_message_id,
+                history_anchor: Some(MessageId::new()),
+                paths,
+                preimages,
+            },
+        );
         workdir
             .write(Path::new("changed.txt"), b"operation")
             .await
@@ -502,6 +602,8 @@ mod tests {
                 id: Uuid::new_v4(),
                 tool_name: "tool".into(),
                 recorded_at_ms: 0,
+                assistant_message_id: MessageId::new(),
+                history_anchor: Some(MessageId::new()),
                 entries: Vec::new(),
             }],
         );

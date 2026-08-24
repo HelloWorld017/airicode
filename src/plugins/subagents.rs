@@ -10,8 +10,8 @@ use serde_json::{json, Value};
 
 use crate::core::{
     Context, Error, Message, MessagePart, Plugin, PluginId, PluginRegistrar, ProviderEvent,
-    ProviderRequest, Result, Role, Tool, ToolCallId, ToolContext, ToolDefinition, ToolId,
-    ToolOutput,
+    ProviderMode, ProviderRequest, Result, Role, Tool, ToolCallId, ToolContext, ToolDefinition,
+    ToolId, ToolOutput,
 };
 
 const PLUGIN_ID: &str = "builtin.subagents";
@@ -181,6 +181,7 @@ impl Tool for SubagentTool {
         for round in 1..=self.config.max_rounds {
             output.rounds = round;
             let request = ProviderRequest {
+                mode: ProviderMode::Subagent,
                 model: model.clone(),
                 messages: messages.clone(),
                 tools: Vec::new(),

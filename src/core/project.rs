@@ -21,7 +21,7 @@ struct ProjectInner {
     id: ProjectId,
     name: String,
     core: Core,
-    workdir: Arc<dyn Workdir>,
+    host_workdir: Arc<dyn Workdir>,
     sessions: RwLock<BTreeMap<SessionId, Session>>,
     cancellation: CancellationToken,
 }
@@ -41,7 +41,7 @@ impl Project {
             id,
             name,
             core,
-            workdir,
+            host_workdir: workdir,
             sessions: RwLock::new(BTreeMap::new()),
             cancellation,
         }))
@@ -54,7 +54,14 @@ impl Project {
         &self.0.name
     }
     pub fn get_workdir(&self) -> Arc<dyn Workdir> {
-        self.0.workdir.clone()
+        self.0.core.workdir_layers().apply(
+            &super::WorkdirLayerContext {
+                project_id: self.id(),
+                project_name: self.name().to_owned(),
+                session_id: None,
+            },
+            self.0.host_workdir.clone(),
+        )
     }
     pub fn get_session(&self, id: SessionId) -> Option<Session> {
         self.0
@@ -76,6 +83,14 @@ impl Project {
             .get(&request.provider)
             .ok_or_else(|| Error::ProviderNotFound(request.provider.clone()))?;
         let id = request.id.unwrap_or_default();
+        let workdir = self.0.core.workdir_layers().apply(
+            &super::WorkdirLayerContext {
+                project_id: self.id(),
+                project_name: self.name().to_owned(),
+                session_id: Some(id),
+            },
+            self.0.host_workdir.clone(),
+        );
         let store = self
             .0
             .core
@@ -83,7 +98,7 @@ impl Project {
             .open_session_store(&SessionStoreContext {
                 project_id: self.id(),
                 project_name: self.name().to_owned(),
-                workdir: self.0.workdir.clone(),
+                workdir: workdir.clone(),
                 session: OpenSession {
                     id: Some(id),
                     ..request.clone()
@@ -98,8 +113,9 @@ impl Project {
             model: request.model,
             hooks: self.0.core.hooks().clone(),
             tools: self.0.core.tools().clone(),
+            commands: self.0.core.commands().clone(),
             providers: self.0.core.providers().clone(),
-            workdir: self.0.workdir.clone(),
+            workdir,
             core: self.0.core.clone(),
             store,
             cancellation: self.0.cancellation.child_token(),

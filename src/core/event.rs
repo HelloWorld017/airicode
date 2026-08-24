@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{Message, PluginId, ProjectId, ProviderEvent, SessionId, TurnId};
+use super::{CommandId, Message, PluginId, ProjectId, ProviderEvent, SessionId, TurnId};
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -36,6 +36,28 @@ pub enum RuntimeEvent {
         session_id: SessionId,
         turn_id: TurnId,
         error: String,
+    },
+    CommandStarted {
+        session_id: SessionId,
+        command_id: CommandId,
+    },
+    CommandCompleted {
+        session_id: SessionId,
+        command_id: CommandId,
+    },
+    CommandCancelled {
+        session_id: SessionId,
+        command_id: CommandId,
+    },
+    CommandFailed {
+        session_id: SessionId,
+        command_id: CommandId,
+        error: String,
+    },
+    HistoryReplaced {
+        session_id: SessionId,
+        revision: u64,
+        messages: Vec<Message>,
     },
     HookFailed {
         plugin_id: PluginId,

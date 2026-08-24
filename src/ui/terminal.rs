@@ -17,15 +17,21 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame, Terminal,
 };
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use unicode_width::UnicodeWidthStr;
 
-use crate::core::{ProviderEvent, RuntimeEvent, Session};
+use crate::core::{CommandResult, Error as CoreError, ProviderEvent, RuntimeEvent, Session};
 
 use super::{
     reduce, Action, EditBarFragment, Effect, Fragment, FragmentLine, FragmentTone, StatusFragment,
-    TranscriptFragment, UiState,
+    SuggestionFragment, TranscriptFragment, UiState,
 };
+
+enum CommandOutcome {
+    Completed(CommandResult),
+    Cancelled,
+    Failed(String),
+}
 
 pub struct Options {
     pub provider: String,
@@ -49,7 +55,9 @@ pub async fn run(
         options.model,
         options.mode,
         options.project,
+        session.command_descriptors(),
     );
+    let (command_tx, mut command_rx) = mpsc::unbounded_channel();
 
     while !state.should_exit {
         terminal
@@ -58,7 +66,7 @@ pub async fn run(
 
         if event::poll(Duration::from_millis(40))? {
             if let Some(action) = event_action(event::read()?) {
-                apply(&session, &mut state, action).await;
+                apply(&session, &command_tx, &mut state, action).await;
             }
         }
 
@@ -69,6 +77,7 @@ pub async fn run(
                 Err(broadcast::error::TryRecvError::Lagged(count)) => {
                     apply(
                         &session,
+                        &command_tx,
                         &mut state,
                         Action::Error(format!("UI event stream lagged by {count} events")),
                     )
@@ -78,6 +87,7 @@ pub async fn run(
                 Err(broadcast::error::TryRecvError::Closed) => {
                     apply(
                         &session,
+                        &command_tx,
                         &mut state,
                         Action::Error("runtime event stream closed".into()),
                     )
@@ -92,8 +102,17 @@ pub async fn run(
                 options.show_reasoning,
                 options.show_tool_calls,
             ) {
-                apply(&session, &mut state, action).await;
+                apply(&session, &command_tx, &mut state, action).await;
             }
+        }
+
+        while let Ok(outcome) = command_rx.try_recv() {
+            let action = match outcome {
+                CommandOutcome::Completed(result) => Action::CommandCompleted(result.content),
+                CommandOutcome::Cancelled => Action::CommandCancelled,
+                CommandOutcome::Failed(error) => Action::CommandError(error),
+            };
+            apply(&session, &command_tx, &mut state, action).await;
         }
     }
 
@@ -101,38 +120,51 @@ pub async fn run(
     Ok(())
 }
 
-async fn apply(session: &Session, state: &mut UiState, action: Action) {
-    let update = reduce(
-        std::mem::replace(
-            state,
-            UiState::new(String::new(), String::new(), String::new(), String::new()),
-        ),
-        action,
-    );
+async fn apply(
+    session: &Session,
+    command_tx: &mpsc::UnboundedSender<CommandOutcome>,
+    state: &mut UiState,
+    action: Action,
+) {
+    let update = reduce(std::mem::replace(state, empty_state()), action);
     *state = update.state;
     match update.effect {
         Effect::None | Effect::Exit => {}
         Effect::Send(text) => {
             if let Err(error) = session.send_text(text).await {
                 *state = reduce(
-                    std::mem::replace(
-                        state,
-                        UiState::new(String::new(), String::new(), String::new(), String::new()),
-                    ),
+                    std::mem::replace(state, empty_state()),
                     Action::Error(format!("could not start turn: {error}")),
                 )
                 .state;
             }
         }
-        Effect::Cancel => match session.cancel_turn().await {
+        Effect::DispatchCommand(invocation) => {
+            let session = session.clone();
+            let command_tx = command_tx.clone();
+            tokio::spawn(async move {
+                let outcome = match session.dispatch_command(invocation).await {
+                    Ok(result) => CommandOutcome::Completed(result),
+                    Err(CoreError::Cancelled) => CommandOutcome::Cancelled,
+                    Err(error) => CommandOutcome::Failed(error.to_string()),
+                };
+                let _ = command_tx.send(outcome);
+            });
+        }
+        Effect::Cancel => match session.cancel_active().await {
             Ok(true) => {}
             Ok(false) => {
-                *state = take_reduce(state, Action::TurnCancelled);
+                let action = if state.active_command {
+                    Action::CommandCancelled
+                } else {
+                    Action::TurnCancelled
+                };
+                *state = take_reduce(state, action);
             }
             Err(error) => {
                 *state = take_reduce(
                     state,
-                    Action::Error(format!("could not cancel turn: {error}")),
+                    Action::Error(format!("could not cancel active operation: {error}")),
                 );
             }
         },
@@ -140,8 +172,17 @@ async fn apply(session: &Session, state: &mut UiState, action: Action) {
 }
 
 fn take_reduce(state: &mut UiState, action: Action) -> UiState {
-    let placeholder = UiState::new(String::new(), String::new(), String::new(), String::new());
-    reduce(std::mem::replace(state, placeholder), action).state
+    reduce(std::mem::replace(state, empty_state()), action).state
+}
+
+fn empty_state() -> UiState {
+    UiState::new(
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+        Vec::new(),
+    )
 }
 
 fn runtime_action(
@@ -179,6 +220,19 @@ fn runtime_action(
         RuntimeEvent::TurnFailed {
             session_id, error, ..
         } if session_id == session.id() => Some(Action::Error(format!("turn failed: {error}"))),
+        RuntimeEvent::CommandStarted { session_id, .. } if session_id == session.id() => {
+            Some(Action::CommandStarted)
+        }
+        RuntimeEvent::CommandCancelled { session_id, .. } if session_id == session.id() => {
+            Some(Action::CommandCancelled)
+        }
+        // Dispatch results carry output and error text; lifecycle events only synchronize state.
+        RuntimeEvent::CommandCompleted { session_id, .. } if session_id == session.id() => {
+            Some(Action::CommandFinished)
+        }
+        RuntimeEvent::CommandFailed { session_id, .. } if session_id == session.id() => {
+            Some(Action::CommandFailed)
+        }
         _ => None,
     }
 }
@@ -213,7 +267,8 @@ fn key_action(key: KeyEvent) -> Option<Action> {
         }
         KeyCode::Enter => Some(Action::Submit),
         KeyCode::Char(character) => Some(Action::Insert(character)),
-        KeyCode::Tab => Some(Action::Insert('\t')),
+        KeyCode::Tab => Some(Action::AcceptCompletion),
+        KeyCode::Esc => Some(Action::DismissCompletions),
         KeyCode::Backspace => Some(Action::Backspace),
         KeyCode::Delete => Some(Action::Delete),
         KeyCode::Left => Some(Action::Left),
@@ -230,6 +285,7 @@ fn draw(frame: &mut Frame<'_>, state: &UiState, color: bool) {
     let area = frame.size();
     let width = area.width as usize;
     let editbar_rows = EditBarFragment.rows(state, width).len() as u16;
+    let suggestion_rows = SuggestionFragment.rows(state, width).len().min(5) as u16;
     let editor_width = width.saturating_sub(2).max(1);
     let editor_height = (state.editor.visual_line_count(editor_width) as u16 + 2).clamp(3, 8);
     let areas = Layout::default()
@@ -237,6 +293,7 @@ fn draw(frame: &mut Frame<'_>, state: &UiState, color: bool) {
         .constraints([
             Constraint::Length(editbar_rows),
             Constraint::Min(1),
+            Constraint::Length(suggestion_rows),
             Constraint::Length(editor_height),
             Constraint::Length(1),
         ])
@@ -244,8 +301,9 @@ fn draw(frame: &mut Frame<'_>, state: &UiState, color: bool) {
 
     render_fragment(frame, areas[0], &EditBarFragment, state, color, false);
     render_transcript(frame, areas[1], state, color);
-    render_editor(frame, areas[2], state, color);
-    render_fragment(frame, areas[3], &StatusFragment, state, color, false);
+    render_fragment(frame, areas[2], &SuggestionFragment, state, color, false);
+    render_editor(frame, areas[3], state, color);
+    render_fragment(frame, areas[4], &StatusFragment, state, color, false);
 }
 
 fn render_transcript(frame: &mut Frame<'_>, area: Rect, state: &UiState, color: bool) {

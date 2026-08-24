@@ -74,6 +74,39 @@ impl Fragment for EditBarFragment {
 
 pub struct StatusFragment;
 
+pub struct SuggestionFragment;
+
+impl Fragment for SuggestionFragment {
+    fn rows(&self, state: &UiState, _width: usize) -> Vec<FragmentLine> {
+        let suggestions = state.command_suggestions();
+        let start = state.selected_completion.saturating_sub(4);
+        suggestions
+            .into_iter()
+            .skip(start)
+            .take(5)
+            .enumerate()
+            .map(|(index, descriptor)| FragmentLine {
+                tone: if start + index == state.selected_completion {
+                    FragmentTone::Accent
+                } else {
+                    FragmentTone::Muted
+                },
+                text: format!(
+                    "{} /{}  {}  Usage: {}",
+                    if start + index == state.selected_completion {
+                        ">"
+                    } else {
+                        " "
+                    },
+                    descriptor.name,
+                    descriptor.description,
+                    descriptor.usage
+                ),
+            })
+            .collect()
+    }
+}
+
 impl Fragment for StatusFragment {
     fn rows(&self, state: &UiState, width: usize) -> Vec<FragmentLine> {
         let help = "Enter send | Alt/Shift+Enter newline | Ctrl-C cancel/exit | Ctrl-D exit";
@@ -83,7 +116,7 @@ impl Fragment for StatusFragment {
             state.status.clone()
         };
         vec![FragmentLine {
-            tone: if state.active_turn {
+            tone: if state.active_turn || state.active_command {
                 FragmentTone::Warning
             } else {
                 FragmentTone::Muted

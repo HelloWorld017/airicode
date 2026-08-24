@@ -66,6 +66,7 @@ uuid_id!(ProjectId);
 uuid_id!(SessionId);
 uuid_id!(TurnId);
 
+named_id!(CommandId);
 named_id!(PluginId);
 named_id!(HookId);
 named_id!(ProviderId);

@@ -61,6 +61,7 @@ pub struct ToolServices {
 pub struct WorkdirLayerContext {
     pub project_id: super::ProjectId,
     pub project_name: String,
+    pub session_id: Option<super::SessionId>,
 }
 
 pub trait WorkdirLayer: Send + Sync {

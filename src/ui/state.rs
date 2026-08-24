@@ -1,5 +1,7 @@
 use unicode_width::UnicodeWidthChar;
 
+use crate::core::{parse_command_invocation, CommandDescriptor, CommandInvocation};
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Editor {
     text: String,
@@ -165,13 +167,23 @@ pub struct UiState {
     pub project: String,
     pub editor: Editor,
     pub transcript: Vec<TranscriptEntry>,
+    pub command_descriptors: Vec<CommandDescriptor>,
+    pub selected_completion: usize,
+    pub completions_dismissed: bool,
     pub active_turn: bool,
+    pub active_command: bool,
     pub status: String,
     pub should_exit: bool,
 }
 
 impl UiState {
-    pub fn new(provider: String, model: String, mode: String, project: String) -> Self {
+    pub fn new(
+        provider: String,
+        model: String,
+        mode: String,
+        project: String,
+        command_descriptors: Vec<CommandDescriptor>,
+    ) -> Self {
         Self {
             provider,
             model,
@@ -179,10 +191,30 @@ impl UiState {
             project,
             editor: Editor::default(),
             transcript: Vec::new(),
+            command_descriptors,
+            selected_completion: 0,
+            completions_dismissed: false,
             active_turn: false,
+            active_command: false,
             status: "ready".into(),
             should_exit: false,
         }
+    }
+
+    pub fn command_suggestions(&self) -> Vec<&CommandDescriptor> {
+        if self.completions_dismissed {
+            return Vec::new();
+        }
+        let Some(prefix) = self.editor.text[..self.editor.cursor].strip_prefix('/') else {
+            return Vec::new();
+        };
+        if prefix.chars().any(char::is_whitespace) {
+            return Vec::new();
+        }
+        self.command_descriptors
+            .iter()
+            .filter(|descriptor| descriptor.name.starts_with(prefix))
+            .collect()
     }
 }
 
@@ -199,6 +231,8 @@ pub enum Action {
     Down,
     Home,
     End,
+    AcceptCompletion,
+    DismissCompletions,
     Submit,
     Interrupt,
     EndOfInput,
@@ -207,6 +241,12 @@ pub enum Action {
     ToolActivity(String),
     TurnCompleted,
     TurnCancelled,
+    CommandStarted,
+    CommandFinished,
+    CommandFailed,
+    CommandCompleted(String),
+    CommandCancelled,
+    CommandError(String),
     Error(String),
 }
 
@@ -214,6 +254,7 @@ pub enum Action {
 pub enum Effect {
     None,
     Send(String),
+    DispatchCommand(CommandInvocation),
     Cancel,
     Exit,
 }
@@ -227,31 +268,83 @@ pub struct Update {
 pub fn reduce(mut state: UiState, action: Action) -> Update {
     let mut effect = Effect::None;
     match action {
-        Action::Insert(character) => state.editor.insert(character),
-        Action::Paste(text) => state.editor.insert_str(&text),
-        Action::Newline => state.editor.insert('\n'),
-        Action::Backspace => state.editor.backspace(),
-        Action::Delete => state.editor.delete(),
+        Action::Insert(character) => {
+            state.editor.insert(character);
+            reset_completions(&mut state);
+        }
+        Action::Paste(text) => {
+            state.editor.insert_str(&text);
+            reset_completions(&mut state);
+        }
+        Action::Newline => {
+            state.editor.insert('\n');
+            reset_completions(&mut state);
+        }
+        Action::Backspace => {
+            state.editor.backspace();
+            reset_completions(&mut state);
+        }
+        Action::Delete => {
+            state.editor.delete();
+            reset_completions(&mut state);
+        }
         Action::Left => state.editor.move_left(),
         Action::Right => state.editor.move_right(),
+        Action::Up if !state.command_suggestions().is_empty() => {
+            let count = state.command_suggestions().len();
+            state.selected_completion = (state.selected_completion + count - 1) % count;
+        }
+        Action::Down if !state.command_suggestions().is_empty() => {
+            let count = state.command_suggestions().len();
+            state.selected_completion = (state.selected_completion + 1) % count;
+        }
         Action::Up => state.editor.move_up(),
         Action::Down => state.editor.move_down(),
         Action::Home => state.editor.move_home(),
         Action::End => state.editor.move_end(),
-        Action::Submit if state.active_turn => state.status = "turn already active".into(),
+        Action::AcceptCompletion => {
+            if let Some(name) = state
+                .command_suggestions()
+                .get(state.selected_completion)
+                .map(|descriptor| descriptor.name.clone())
+            {
+                state.editor.text = format!("/{name} ");
+                state.editor.cursor = state.editor.text.len();
+                state.completions_dismissed = true;
+            } else {
+                state.editor.insert('\t');
+            }
+        }
+        Action::DismissCompletions => state.completions_dismissed = true,
+        Action::Submit if state.active_turn || state.active_command => {
+            state.status = "session already active".into()
+        }
         Action::Submit if state.editor.text().trim().is_empty() => {}
         Action::Submit => {
             let text = std::mem::take(&mut state.editor.text);
             state.editor.cursor = 0;
-            state.transcript.push(TranscriptEntry {
-                kind: TranscriptKind::User,
-                text: text.clone(),
-            });
-            state.active_turn = true;
-            state.status = "working (Ctrl-C to cancel)".into();
-            effect = Effect::Send(text);
+            reset_completions(&mut state);
+            if text.starts_with('/') {
+                if let Some(invocation) = parse_command_invocation(&text) {
+                    state.active_command = true;
+                    state.status = format!("running /{} (Ctrl-C to cancel)", invocation.name);
+                    effect = Effect::DispatchCommand(invocation);
+                } else {
+                    state.status = "enter a command name".into();
+                    state.editor.text = text;
+                    state.editor.cursor = state.editor.text.len();
+                }
+            } else {
+                state.transcript.push(TranscriptEntry {
+                    kind: TranscriptKind::User,
+                    text: text.clone(),
+                });
+                state.active_turn = true;
+                state.status = "working (Ctrl-C to cancel)".into();
+                effect = Effect::Send(text);
+            }
         }
-        Action::Interrupt if state.active_turn => {
+        Action::Interrupt if state.active_turn || state.active_command => {
             state.status = "cancelling".into();
             effect = Effect::Cancel;
         }
@@ -275,6 +368,38 @@ pub fn reduce(mut state: UiState, action: Action) -> Update {
             state.active_turn = false;
             state.status = "turn cancelled".into();
         }
+        Action::CommandStarted => {
+            state.active_command = true;
+            state.status = "command running (Ctrl-C to cancel)".into();
+        }
+        Action::CommandFinished => {
+            state.active_command = false;
+            state.status = "ready".into();
+        }
+        Action::CommandFailed => {
+            state.active_command = false;
+            state.status = "command error".into();
+        }
+        Action::CommandCompleted(content) => {
+            state.active_command = false;
+            state.status = "ready".into();
+            state.transcript.push(TranscriptEntry {
+                kind: TranscriptKind::System,
+                text: content,
+            });
+        }
+        Action::CommandCancelled => {
+            state.active_command = false;
+            state.status = "command cancelled".into();
+        }
+        Action::CommandError(error) => {
+            state.active_command = false;
+            state.status = "command error".into();
+            state.transcript.push(TranscriptEntry {
+                kind: TranscriptKind::Error,
+                text: error,
+            });
+        }
         Action::Error(error) => {
             state.active_turn = false;
             state.status = "error".into();
@@ -285,6 +410,11 @@ pub fn reduce(mut state: UiState, action: Action) -> Update {
         }
     }
     Update { state, effect }
+}
+
+fn reset_completions(state: &mut UiState) {
+    state.selected_completion = 0;
+    state.completions_dismissed = false;
 }
 
 fn append_stream(state: &mut UiState, kind: TranscriptKind, text: String) {
@@ -304,7 +434,24 @@ mod tests {
     use super::*;
 
     fn state() -> UiState {
-        UiState::new("provider".into(), "model".into(), "mode".into(), ".".into())
+        UiState::new(
+            "provider".into(),
+            "model".into(),
+            "mode".into(),
+            ".".into(),
+            vec![
+                CommandDescriptor {
+                    name: "help".into(),
+                    description: "show help".into(),
+                    usage: "/help".into(),
+                },
+                CommandDescriptor {
+                    name: "history".into(),
+                    description: "show history".into(),
+                    usage: "/history".into(),
+                },
+            ],
+        )
     }
 
     #[test]
@@ -339,6 +486,65 @@ mod tests {
         assert!(update.state.editor.is_empty());
         assert!(update.state.active_turn);
         assert_eq!(update.state.transcript[0].kind, TranscriptKind::User);
+    }
+
+    #[test]
+    fn slash_submit_dispatches_without_starting_turn_or_adding_user_message() {
+        let update = reduce(
+            reduce(state(), Action::Paste("/help topic".into())).state,
+            Action::Submit,
+        );
+        assert_eq!(
+            update.effect,
+            Effect::DispatchCommand(CommandInvocation {
+                name: "help".into(),
+                arguments: "topic".into(),
+            })
+        );
+        assert!(update.state.active_command);
+        assert!(!update.state.active_turn);
+        assert!(update.state.transcript.is_empty());
+    }
+
+    #[test]
+    fn completion_can_be_selected_and_accepted() {
+        let state = reduce(state(), Action::Paste("/h".into())).state;
+        assert_eq!(state.command_suggestions().len(), 2);
+        let state = reduce(state, Action::Down).state;
+        assert_eq!(state.selected_completion, 1);
+        let state = reduce(state, Action::AcceptCompletion).state;
+        assert_eq!(state.editor.text(), "/history ");
+        assert!(state.command_suggestions().is_empty());
+    }
+
+    #[test]
+    fn command_results_errors_and_cancellation_are_distinct() {
+        let mut active = state();
+        active.active_command = true;
+        let completed = reduce(active.clone(), Action::CommandCompleted("ok".into())).state;
+        assert_eq!(completed.transcript[0].kind, TranscriptKind::System);
+        assert!(!completed.active_command);
+
+        let failed = reduce(active.clone(), Action::CommandError("bad".into())).state;
+        assert_eq!(failed.transcript[0].kind, TranscriptKind::Error);
+        assert!(!failed.active_command);
+
+        let cancelled = reduce(active, Action::Interrupt);
+        assert_eq!(cancelled.effect, Effect::Cancel);
+        let cancelled = reduce(cancelled.state, Action::CommandCancelled).state;
+        assert_eq!(cancelled.status, "command cancelled");
+        assert!(cancelled.transcript.is_empty());
+    }
+
+    #[test]
+    fn command_lifecycle_does_not_duplicate_result_output() {
+        let mut active = state();
+        active.active_command = true;
+        let finished = reduce(active, Action::CommandFinished).state;
+        assert!(finished.transcript.is_empty());
+        let completed = reduce(finished, Action::CommandCompleted("result".into())).state;
+        assert_eq!(completed.transcript.len(), 1);
+        assert_eq!(completed.transcript[0].text, "result");
     }
 
     #[test]

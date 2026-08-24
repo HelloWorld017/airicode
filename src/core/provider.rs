@@ -15,11 +15,22 @@ pub struct Model {
 
 #[derive(Clone, Debug)]
 pub struct ProviderRequest {
+    pub mode: ProviderMode,
     pub model: String,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDefinition>,
     pub context: Context,
     pub cancellation: CancellationToken,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderMode {
+    #[default]
+    Normal,
+    Compaction,
+    SideQuery,
+    Subagent,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]

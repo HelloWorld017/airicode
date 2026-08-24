@@ -1,11 +1,14 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 use async_trait::async_trait;
 
 use super::{
-    Context, Error, HookId, Message, PluginId, Provider, ProviderId, ProviderRequest, Result,
-    RuntimeEvent, SessionStoreFactory, SessionStoreFactoryId, Tool, ToolCallId, ToolId, ToolOutput,
-    TurnId, Workdir, WorkdirLayer, WorkdirLayerId,
+    Command, CommandId, Context, Error, HookId, Message, PluginId, Provider, ProviderId,
+    ProviderRequest, Result, RuntimeEvent, SessionStoreFactory, SessionStoreFactoryId, Tool,
+    ToolCallId, ToolId, ToolOutput, TurnId, Workdir, WorkdirLayer, WorkdirLayerId,
 };
 
 pub type PluginPriority = i32;
@@ -14,6 +17,123 @@ pub type PluginPriority = i32;
 pub struct HookContext {
     pub project_id: super::ProjectId,
     pub session_id: super::SessionId,
+}
+
+struct HookServices {
+    history: super::SessionHistory,
+    providers: super::ProviderRegistry,
+    provider_id: ProviderId,
+    model: String,
+    cancellation: Mutex<tokio_util::sync::CancellationToken>,
+}
+
+pub(crate) struct HookServicesRegistration(Arc<HookServices>);
+
+static HOOK_SERVICES: OnceLock<Mutex<BTreeMap<super::SessionId, Arc<HookServices>>>> =
+    OnceLock::new();
+
+pub(crate) fn install_hook_services(
+    session_id: super::SessionId,
+    history: super::SessionHistory,
+    providers: super::ProviderRegistry,
+    provider_id: ProviderId,
+    model: String,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> HookServicesRegistration {
+    let services = Arc::new(HookServices {
+        history,
+        providers,
+        provider_id,
+        model,
+        cancellation: Mutex::new(cancellation),
+    });
+    HOOK_SERVICES
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .expect("hook services lock poisoned")
+        .insert(session_id, services.clone());
+    HookServicesRegistration(services)
+}
+
+pub(crate) fn uninstall_hook_services(
+    session_id: super::SessionId,
+    registration: &HookServicesRegistration,
+) {
+    let Some(services) = HOOK_SERVICES.get() else {
+        return;
+    };
+    let mut services = services.lock().expect("hook services lock poisoned");
+    if services
+        .get(&session_id)
+        .is_some_and(|current| Arc::ptr_eq(current, &registration.0))
+    {
+        services.remove(&session_id);
+    }
+}
+
+pub(crate) fn set_hook_cancellation(
+    session_id: super::SessionId,
+    cancellation: tokio_util::sync::CancellationToken,
+) {
+    let Some(services) = HOOK_SERVICES.get() else {
+        return;
+    };
+    let services = services.lock().expect("hook services lock poisoned");
+    let Some(current) = services.get(&session_id) else {
+        return;
+    };
+    *current
+        .cancellation
+        .lock()
+        .expect("hook cancellation lock poisoned") = cancellation;
+}
+
+impl HookContext {
+    fn services(&self) -> Option<Arc<HookServices>> {
+        HOOK_SERVICES.get().and_then(|services| {
+            services
+                .lock()
+                .expect("hook services lock poisoned")
+                .get(&self.session_id)
+                .cloned()
+        })
+    }
+
+    pub fn history(&self) -> super::SessionHistory {
+        self.services()
+            .map(|services| services.history.clone())
+            .unwrap_or_else(|| super::SessionHistory::closed(self.session_id))
+    }
+
+    pub fn providers(&self) -> super::ProviderRegistry {
+        self.services()
+            .expect("hook context is not attached to a core session")
+            .providers
+            .clone()
+    }
+
+    pub fn provider_id(&self) -> ProviderId {
+        self.services()
+            .expect("hook context is not attached to a core session")
+            .provider_id
+            .clone()
+    }
+
+    pub fn model(&self) -> String {
+        self.services()
+            .expect("hook context is not attached to a core session")
+            .model
+            .clone()
+    }
+
+    pub fn cancellation(&self) -> tokio_util::sync::CancellationToken {
+        self.services()
+            .expect("hook context is not attached to a core session")
+            .cancellation
+            .lock()
+            .expect("hook cancellation lock poisoned")
+            .clone()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,6 +153,7 @@ pub struct ToolCallDraft {
 pub struct ToolExecutionContext {
     pub hook_context: HookContext,
     pub turn_id: TurnId,
+    pub assistant_message_id: super::MessageId,
     pub workdir: Arc<dyn Workdir>,
     pub call: ToolCallDraft,
 }
@@ -138,6 +259,35 @@ impl PluginRegistrar {
             return Err(Error::DuplicateTool(id));
         }
         staged.tools.push(StagedTool { id, priority, tool });
+        Ok(())
+    }
+
+    pub fn register_command(
+        &self,
+        priority: PluginPriority,
+        command: Arc<dyn Command>,
+    ) -> Result<()> {
+        let id = command.id();
+        let descriptor = command.descriptor();
+        validate_command_descriptor(&descriptor)?;
+        let mut guard = self.staged.lock().expect("plugin registrar lock poisoned");
+        let staged = guard.as_mut().ok_or(Error::PluginRegistrarClosed)?;
+        if staged.commands.iter().any(|entry| entry.id == id) {
+            return Err(Error::DuplicateCommand(id));
+        }
+        if staged
+            .commands
+            .iter()
+            .any(|entry| entry.descriptor.name == descriptor.name)
+        {
+            return Err(Error::DuplicateCommandName(descriptor.name));
+        }
+        staged.commands.push(StagedCommand {
+            id,
+            descriptor,
+            priority,
+            command,
+        });
         Ok(())
     }
 
@@ -259,11 +409,19 @@ impl PluginRegistrar {
 
 #[derive(Default)]
 pub(crate) struct StagedRegistrations {
+    pub(crate) commands: Vec<StagedCommand>,
     pub(crate) providers: Vec<StagedProvider>,
     pub(crate) tools: Vec<StagedTool>,
     pub(crate) hooks: Vec<StagedHook>,
     pub(crate) store_factories: Vec<StagedStoreFactory>,
     pub(crate) workdir_layers: Vec<StagedWorkdirLayer>,
+}
+
+pub(crate) struct StagedCommand {
+    pub(crate) id: CommandId,
+    pub(crate) descriptor: super::CommandDescriptor,
+    pub(crate) priority: PluginPriority,
+    pub(crate) command: Arc<dyn Command>,
 }
 
 pub(crate) struct StagedProvider {
@@ -316,4 +474,16 @@ impl Hook {
             Self::RuntimeEvent(_) => 5,
         }
     }
+}
+
+fn validate_command_descriptor(descriptor: &super::CommandDescriptor) -> Result<()> {
+    if descriptor.name.is_empty()
+        || descriptor.name.starts_with('/')
+        || descriptor.name.chars().any(char::is_whitespace)
+    {
+        return Err(Error::InvalidCommandDescriptor(
+            "name must be non-empty, contain no whitespace, and omit the leading slash".into(),
+        ));
+    }
+    Ok(())
 }
