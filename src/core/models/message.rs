@@ -55,15 +55,11 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn text(role: Role, text: impl Into<String>, turn_id: Option<TurnId>) -> Self {
-        Self::text_with_mode(role, text, turn_id, DEFAULT_MODE)
-    }
-
-    pub fn text_with_mode(
+    pub fn text(
         role: Role,
         text: impl Into<String>,
-        turn_id: Option<TurnId>,
         mode: impl Into<String>,
+        turn_id: Option<TurnId>,
     ) -> Self {
         Self {
             id: MessageId::new(),

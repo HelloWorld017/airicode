@@ -18,7 +18,7 @@ use std::path::PathBuf;
 fn reducer_replays_atomic_conversation_and_invalidation() -> airicode::Result<()> {
     let session_id = SessionId::new();
     let group_id = SessionGroupId::new();
-    let message = Message::text(Role::User, "hello", None);
+    let message = Message::text(Role::User, "hello", "build", None);
     let part = airicode::core::models::ContextPart {
         id: airicode::core::models::ContextPartId::new(),
         priority: ContextPriority::High,
@@ -60,8 +60,8 @@ fn reducer_replays_atomic_conversation_and_invalidation() -> airicode::Result<()
 fn context_is_sorted_by_time_sequence_not_priority() -> airicode::Result<()> {
     let session_id = SessionId::new();
     let group_id = SessionGroupId::new();
-    let older_message = Message::text(Role::User, "older", None);
-    let newer_message = Message::text(Role::User, "newer", None);
+    let older_message = Message::text(Role::User, "older", "build", None);
+    let newer_message = Message::text(Role::User, "newer", "build", None);
     let older_message_id = older_message.id;
     let newer_message_id = newer_message.id;
     let older_part = airicode::core::models::ContextPart {
@@ -105,7 +105,7 @@ fn context_is_sorted_by_time_sequence_not_priority() -> airicode::Result<()> {
 #[tokio::test]
 async fn actor_commits_message_and_context_as_one_operation() -> airicode::Result<()> {
     let session = new_session(SessionId::new(), SessionGroupId::new());
-    let message = Message::text(Role::User, "atomic", None);
+    let message = Message::text(Role::User, "atomic", "build", None);
     let (message_id, context_id) = session
         .operations
         .add_conversation_message(message, ContextPriority::High)
@@ -250,7 +250,7 @@ fn reducer_rejects_sequence_gaps() {
 #[test]
 fn reducer_does_not_apply_a_partial_invalid_commit() {
     let mut state = SessionState::new(SessionId::new(), SessionGroupId::new());
-    let message = Message::text(Role::User, "must not persist", None);
+    let message = Message::text(Role::User, "must not persist", "build", None);
     let commit = airicode::core::models::SessionCommit::new(
         1,
         vec![

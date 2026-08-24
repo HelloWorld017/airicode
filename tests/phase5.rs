@@ -130,6 +130,7 @@ async fn fake_provider_completes_a_read_tool_turn_on_a_real_project() -> Result<
         session.operations.session_id(),
         provider_id,
         "fake-model",
+        "build",
         "Read hello.txt",
     );
     engine.run(request).await?;

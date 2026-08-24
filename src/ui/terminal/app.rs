@@ -149,9 +149,9 @@ impl TerminalApp {
                     self.session.operations.session_id(),
                     self.provider_id,
                     self.model.clone(),
+                    self.editbar.mode.clone(),
                     input,
-                )
-                .with_mode(self.editbar.mode.clone());
+                );
                 let engine = self.engine.clone();
                 tokio::spawn(async move {
                     let _ = engine.run(request).await;

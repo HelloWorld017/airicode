@@ -113,7 +113,7 @@ mod tests {
     #[tokio::test]
     async fn loads_system_and_plan_prompts_at_their_positions() {
         let plugin = InstructionBasePlugin::new();
-        let message = Message::text_with_mode(Role::User, "plan this", None, "plan");
+        let message = Message::text(Role::User, "plan this", "plan", None);
         let contributions = plugin
             .contribute(ContextContributionContext {
                 turn_id: TurnId::new(),

@@ -27,7 +27,7 @@ async fn jsonl_store_replays_and_recovers_an_incomplete_tail() -> Result<()> {
     session
         .operations
         .add_conversation_message(
-            Message::text(Role::User, "persist me", None),
+            Message::text(Role::User, "persist me", "build", None),
             ContextPriority::High,
         )
         .await?;
@@ -39,7 +39,7 @@ async fn jsonl_store_replays_and_recovers_an_incomplete_tail() -> Result<()> {
     );
     handle
         .operations
-        .add_message(Message::text(Role::Assistant, "durable", None))
+        .add_message(Message::text(Role::Assistant, "durable", "build", None))
         .await?;
     let log = persisted.path_for(session_id);
     let mut partial = tokio::fs::OpenOptions::new()
@@ -77,7 +77,7 @@ async fn persisted_session_actor_does_not_advance_when_append_fails() -> Result<
     );
     let result = session
         .operations
-        .add_message(Message::text(Role::User, "write", None))
+        .add_message(Message::text(Role::User, "write", "build", None))
         .await;
     assert!(result.is_ok());
     assert_eq!(session.operations.snapshot().await?.last_sequence, 1);

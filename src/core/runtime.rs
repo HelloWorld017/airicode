@@ -39,6 +39,7 @@ impl TurnRequest {
         session_id: SessionId,
         provider_id: super::models::ProviderId,
         model: impl Into<String>,
+        mode: impl Into<String>,
         input: impl Into<String>,
     ) -> Self {
         Self {
@@ -47,15 +48,10 @@ impl TurnRequest {
             session_id,
             provider_id,
             model: model.into(),
-            mode: super::models::DEFAULT_MODE.into(),
+            mode: mode.into(),
             input: input.into(),
             cancellation: CancellationToken::new(),
         }
-    }
-
-    pub fn with_mode(mut self, mode: impl Into<String>) -> Self {
-        self.mode = mode.into();
-        self
     }
 }
 
@@ -77,11 +73,11 @@ impl TurnEngine {
 
     pub async fn run(&self, request: TurnRequest) -> Result<TurnId> {
         let turn_id = TurnId::new();
-        let user = Message::text_with_mode(
+        let user = Message::text(
             Role::User,
             request.input.clone(),
-            Some(turn_id),
             request.mode.clone(),
+            Some(turn_id),
         );
         let user_for_hook = Arc::new(user.clone());
         for hook in self.registry.hooks().before_message.clone() {
@@ -121,14 +117,12 @@ impl TurnEngine {
                             messages.push(Arc::new(message.clone()));
                         }
                     }
-                    ContextSource::Custom(text) => {
-                        messages.push(Arc::new(Message::text_with_mode(
-                            Role::System,
-                            text,
-                            Some(turn_id),
-                            request.mode.clone(),
-                        )))
-                    }
+                    ContextSource::Custom(text) => messages.push(Arc::new(Message::text(
+                        Role::System,
+                        text,
+                        request.mode.clone(),
+                        Some(turn_id),
+                    ))),
                 }
             }
             let contributions = self
@@ -442,11 +436,11 @@ fn materialize_context(
     let mut timeline = Vec::new();
     let mut end = Vec::new();
     for contribution in contributions {
-        let message = Arc::new(Message::text_with_mode(
+        let message = Arc::new(Message::text(
             Role::System,
             contribution.text,
-            Some(turn_id),
             mode,
+            Some(turn_id),
         ));
         match contribution.position {
             ContextContributionPosition::Start => start.push(message),
@@ -493,7 +487,7 @@ mod tests {
     use crate::utils::TimeSeq;
 
     fn message(text: &str, created_at: TimeSeq) -> Arc<Message> {
-        let mut message = Message::text(Role::User, text, None);
+        let mut message = Message::text(Role::User, text, "build", None);
         message.created_at = created_at;
         Arc::new(message)
     }
