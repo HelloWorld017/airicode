@@ -127,8 +127,7 @@ mod tests {
         let values = thread::scope(|scope| {
             (0..8)
                 .map(|_| scope.spawn(|| (0..32).map(|_| generator.generate()).collect::<Vec<_>>()))
-                .map(|thread| thread.join().expect("issuer thread panicked"))
-                .flatten()
+                .flat_map(|thread| thread.join().expect("issuer thread panicked"))
                 .collect::<Vec<_>>()
         });
         let mut sorted = values.clone();

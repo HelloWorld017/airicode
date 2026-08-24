@@ -9,7 +9,9 @@ mod invalidate_message;
 mod request;
 mod update_note;
 
-pub use create_session::{create_session, new_session};
+pub use create_session::{create_session, new_session, new_session_with_store};
+
+use std::sync::Arc;
 
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
@@ -17,6 +19,7 @@ use super::error::{Error, Result};
 use super::models::{
     RuntimeEvent, SessionCommit, SessionGroupId, SessionId, SessionMutation, SessionState,
 };
+use super::persistence::SessionStore;
 
 enum SessionRequest {
     Commit {
@@ -45,6 +48,10 @@ pub struct SessionHandle {
 
 impl SessionHandle {
     pub fn spawn(state: SessionState) -> Self {
+        Self::spawn_with_store(state, None)
+    }
+
+    pub fn spawn_with_store(state: SessionState, store: Option<Arc<dyn SessionStore>>) -> Self {
         let (sender, receiver) = mpsc::channel(64);
         let (snapshot_tx, snapshot) = watch::channel(state.clone());
         let (events, _) = broadcast::channel(256);
@@ -54,7 +61,13 @@ impl SessionHandle {
             group_id: state.group_id,
             events: events.clone(),
         };
-        tokio::spawn(run_actor(state, receiver, snapshot_tx, events.clone()));
+        tokio::spawn(run_actor(
+            state,
+            receiver,
+            snapshot_tx,
+            events.clone(),
+            store,
+        ));
         Self {
             operations,
             snapshot,
@@ -93,6 +106,7 @@ async fn run_actor(
     mut receiver: mpsc::Receiver<SessionRequest>,
     snapshot: watch::Sender<SessionState>,
     events: broadcast::Sender<RuntimeEvent>,
+    store: Option<Arc<dyn SessionStore>>,
 ) {
     while let Some(request) = receiver.recv().await {
         match request {
@@ -101,12 +115,21 @@ async fn run_actor(
                 response,
             } => {
                 let commit = SessionCommit::new(state.last_sequence + 1, mutations);
-                let result = state.apply(&commit);
-                if result.is_ok() {
-                    let _ = snapshot.send(state.clone());
-                    let _ = events.send(RuntimeEvent::SessionSnapshotChanged);
+                let mut next = state.clone();
+                if let Err(error) = next.apply(&commit) {
+                    let _ = response.send(Err(error));
+                    continue;
                 }
-                let _ = response.send(result.map(|_| commit));
+                if let Some(store) = &store {
+                    if let Err(error) = store.append(state.session_id, &commit).await {
+                        let _ = response.send(Err(error));
+                        continue;
+                    }
+                }
+                state = next;
+                let _ = snapshot.send(state.clone());
+                let _ = events.send(RuntimeEvent::SessionSnapshotChanged);
+                let _ = response.send(Ok(commit));
             }
             SessionRequest::Snapshot { response } => {
                 let _ = response.send(state.clone());

@@ -10,6 +10,7 @@ use super::{
         Command, CommandId, PluginId, Provider, ProviderId, RegistrationId, ShellAction,
         ShellActionId, Tool, ToolId, WorkdirLayerId,
     },
+    persistence::SessionStore,
     workdir::WorkdirLayer,
 };
 
@@ -31,6 +32,7 @@ struct RegistryState {
     commands: HashMap<CommandId, Registered<dyn Command>>,
     shell_actions: HashMap<ShellActionId, Registered<dyn ShellAction>>,
     workdir_layers: HashMap<WorkdirLayerId, Registered<dyn WorkdirLayer>>,
+    session_stores: HashMap<RegistrationId, Registered<dyn SessionStore>>,
 }
 
 struct Registered<T: ?Sized> {
@@ -48,6 +50,7 @@ enum RegistrationKind {
     Command(CommandId),
     ShellAction(ShellActionId),
     WorkdirLayer(WorkdirLayerId),
+    SessionStore(RegistrationId),
 }
 
 #[derive(Clone)]
@@ -79,6 +82,7 @@ impl Registry {
                     commands: HashMap::new(),
                     shell_actions: HashMap::new(),
                     workdir_layers: HashMap::new(),
+                    session_stores: HashMap::new(),
                 }),
                 hooks: RwLock::new(super::hooks::HookRegistry::default()),
             }),
@@ -247,6 +251,26 @@ impl Registry {
         values.into_iter().map(|(value, _, _, _)| value).collect()
     }
 
+    pub fn session_store(&self) -> Option<Arc<dyn SessionStore>> {
+        let mut stores = self
+            .inner
+            .state
+            .read()
+            .ok()?
+            .session_stores
+            .values()
+            .map(|entry| Registered {
+                value: entry.value.clone(),
+                owner: entry.owner,
+                priority: entry.priority,
+                order: entry.order,
+                registration_id: entry.registration_id,
+            })
+            .collect::<Vec<_>>();
+        stores.sort_by_key(|entry| (-entry.priority, entry.order));
+        stores.into_iter().next().map(|entry| entry.value)
+    }
+
     pub fn layer_workdir(
         &self,
         context: &super::models::WorkdirLayerContext,
@@ -310,6 +334,7 @@ impl Registry {
                     .is_some_and(|entry| entry.registration_id == registration_id)
                     && state.workdir_layers.remove(&id).is_some()
             }
+            RegistrationKind::SessionStore(id) => state.session_stores.remove(&id).is_some(),
         };
         if !removed {
             return Err(Error::Registry(
@@ -331,6 +356,7 @@ impl Registry {
         state.commands.retain(|_, value| value.owner != owner);
         state.shell_actions.retain(|_, value| value.owner != owner);
         state.workdir_layers.retain(|_, value| value.owner != owner);
+        state.session_stores.retain(|_, value| value.owner != owner);
         state.revision += 1;
         Ok(())
     }
@@ -545,6 +571,38 @@ impl PluginRegistryScope {
         Ok(RegistrationHandle {
             registry: self.registry.clone(),
             kind: RegistrationKind::WorkdirLayer(id),
+            registration_id,
+        })
+    }
+
+    pub fn register_session_store(
+        &self,
+        store: Arc<dyn SessionStore>,
+        priority: i32,
+    ) -> Result<RegistrationHandle> {
+        let mut state = self
+            .registry
+            .inner
+            .state
+            .write()
+            .map_err(|_| Error::Registry("registry poisoned".into()))?;
+        state.order += 1;
+        let registration_id = RegistrationId::new();
+        let order = state.order;
+        state.session_stores.insert(
+            registration_id,
+            Registered {
+                value: store,
+                owner: self.owner,
+                priority,
+                order,
+                registration_id,
+            },
+        );
+        state.revision += 1;
+        Ok(RegistrationHandle {
+            registry: self.registry.clone(),
+            kind: RegistrationKind::SessionStore(registration_id),
             registration_id,
         })
     }

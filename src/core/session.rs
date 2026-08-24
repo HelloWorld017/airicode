@@ -29,6 +29,18 @@ impl SessionState {
         context
     }
 
+    pub fn replay(
+        session_id: super::models::SessionId,
+        group_id: super::models::SessionGroupId,
+        commits: Vec<SessionCommit>,
+    ) -> Result<Self> {
+        let mut state = Self::new(session_id, group_id);
+        for commit in commits {
+            state.apply(&commit)?;
+        }
+        Ok(state)
+    }
+
     pub fn visible_messages(&self) -> Vec<&super::models::Message> {
         let mut messages = self
             .messages

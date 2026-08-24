@@ -195,7 +195,7 @@ impl TurnEngine {
                 if stop {
                     self.commit_tool_result(
                         turn_id,
-                        call.id,
+                        call.id.clone(),
                         ToolOutput::Failure {
                             content: "Cancelled because execution stopped for user input.".into(),
                         },
@@ -206,7 +206,7 @@ impl TurnEngine {
                 self.operations
                     .emit(RuntimeEvent::ToolExecutionStarted {
                         turn_id,
-                        call_id: call.id,
+                        call_id: call.id.clone(),
                         name: call.name.clone(),
                     })
                     .await?;
@@ -223,7 +223,7 @@ impl TurnEngine {
                 self.operations
                     .emit(RuntimeEvent::ToolExecutionFinished {
                         turn_id,
-                        call_id: output.0,
+                        call_id: output.0.clone(),
                         output: output.1.clone(),
                     })
                     .await?;
@@ -294,8 +294,9 @@ impl TurnEngine {
                     if let Some(name) = name {
                         call.name = name;
                     }
-                    if id.is_some() {
-                        call.provider_id = id;
+                    if let Some(id) = id {
+                        call.id = ToolCallId::from_external(id.clone());
+                        call.provider_id = Some(id);
                     }
                     call.arguments.push_str(&arguments);
                 }
@@ -318,7 +319,7 @@ impl TurnEngine {
             let arguments = serde_json::from_str(&call.arguments)
                 .unwrap_or_else(|_| Value::String(call.arguments.clone()));
             parts.push(MessagePart::ToolCall {
-                id: call.id,
+                id: call.id.clone(),
                 name: call.name.clone(),
                 arguments,
             });
@@ -347,7 +348,7 @@ impl TurnEngine {
         for hook in self.registry.hooks().before_tool.clone() {
             hook.before_tool_execution(BeforeToolExecutionContext {
                 turn_id,
-                call_id: call.id,
+                call_id: call.id.clone(),
                 tool_name: call.name.clone(),
             })
             .await?;
@@ -371,7 +372,7 @@ impl TurnEngine {
         for hook in self.registry.hooks().after_tool.clone() {
             hook.after_tool_execution(super::hooks::AfterToolExecutionContext {
                 turn_id,
-                call_id: call.id,
+                call_id: call.id.clone(),
                 tool_name: call.name.clone(),
                 output: output.clone(),
             })

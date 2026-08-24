@@ -6,7 +6,7 @@ use super::{
     config::{aggregate, Config},
     error::Result,
     models::{Plugin, ProjectId, SessionGroupId, SessionId, SessionState},
-    operations::{new_session, SessionHandle},
+    operations::{new_session, new_session_with_store, SessionHandle},
     registry::Registry,
     shell::ShellActionHandler,
 };
@@ -40,12 +40,21 @@ impl CoreBuilder {
     pub async fn build(self) -> Result<Core> {
         let registry = Registry::new();
         let mut schemas = Vec::new();
-        for plugin in self.plugins {
+        for plugin in &self.plugins {
             let scope = registry.scope(plugin.id());
             schemas.push((plugin.name().to_string(), plugin.config_schema()));
-            plugin.init(scope).await?;
+            plugin.clone().init(scope).await?;
         }
         let config = aggregate(self.raw_config, &schemas)?;
+        for plugin in &self.plugins {
+            let namespace = config
+                .namespace(plugin.name())
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Default::default()));
+            plugin
+                .configure(&namespace, registry.scope(plugin.id()))
+                .await?;
+        }
         Ok(Core { registry, config })
     }
 }
@@ -76,10 +85,37 @@ impl Core {
         ShellActionHandler::new(self.registry())
     }
     pub fn create_session(&self, group_id: SessionGroupId) -> SessionHandle {
-        new_session(SessionId::new(), group_id)
+        match self.registry.session_store() {
+            Some(store) => new_session_with_store(SessionId::new(), group_id, store),
+            None => new_session(SessionId::new(), group_id),
+        }
     }
     pub fn open_session(&self, state: SessionState) -> SessionHandle {
-        SessionHandle::spawn(state)
+        SessionHandle::spawn_with_store(state, self.registry.session_store())
+    }
+
+    pub async fn load_session(
+        &self,
+        session_id: SessionId,
+        group_id: SessionGroupId,
+    ) -> Result<SessionHandle> {
+        let state = SessionState::replay(
+            session_id,
+            group_id,
+            match self.registry.session_store() {
+                Some(store) => store.load(session_id).await?,
+                None => Vec::new(),
+            },
+        )?;
+        Ok(self.open_session(state))
+    }
+
+    pub async fn open_or_create_session(
+        &self,
+        session_id: SessionId,
+        group_id: SessionGroupId,
+    ) -> Result<SessionHandle> {
+        self.load_session(session_id, group_id).await
     }
 }
 
