@@ -247,13 +247,20 @@ fn render_entry(entry: TimelineEntry) -> Line<'static> {
             message
                 .content
                 .iter()
-                .map(|part| match part {
-                    crate::core::models::MessagePart::Text { text } => text.clone(),
-                    crate::core::models::MessagePart::Reasoning { text } => text.clone(),
-                    crate::core::models::MessagePart::ToolCall { name, .. } =>
-                        format!("tool call: {name}"),
-                    crate::core::models::MessagePart::ToolResult { summary, .. } =>
-                        format!("tool result: {summary}"),
+                .map(|part| match part.content.as_ref() {
+                    Some(crate::core::models::MessagePartContent::Text { text }) => text.clone(),
+                    Some(crate::core::models::MessagePartContent::Reasoning { text }) => {
+                        text.clone()
+                    }
+                    Some(crate::core::models::MessagePartContent::ToolCall { name, .. }) => {
+                        format!("tool call: {name}")
+                    }
+                    Some(crate::core::models::MessagePartContent::ToolResult {
+                        summary, ..
+                    }) => {
+                        format!("tool result: {summary}")
+                    }
+                    None => String::new(),
                 })
                 .collect::<Vec<_>>()
                 .join("")

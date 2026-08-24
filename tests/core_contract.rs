@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use airicode::core::{
     models::{
-        ContextPriority, ContextSource, Message, Role, SessionGroupId, SessionId, SessionMutation,
-        SessionState, ShellAction, ShellActionContext, ShellActionDefinition, ShellActionId,
-        ShellActionInput, ToolDefinition, ToolId, ToolOutput,
+        ContextPriority, ContextSource, Message, MessagePart, Role, SessionGroupId, SessionId,
+        SessionMutation, SessionState, ShellAction, ShellActionContext, ShellActionDefinition,
+        ShellActionId, ShellActionInput, ToolDefinition, ToolId, ToolOutput,
     },
     operations::new_session,
     registry::Registry,
@@ -268,4 +268,23 @@ fn reducer_does_not_apply_a_partial_invalid_commit() {
     assert!(state.apply(&commit).is_err());
     assert!(state.messages.is_empty());
     assert_eq!(state.last_sequence, 0);
+}
+
+#[test]
+fn reducer_rejects_empty_message_parts() {
+    let group_id = SessionGroupId::new();
+    let mut state = SessionState::new(SessionId::new(group_id), group_id);
+    let message = Message {
+        content: vec![MessagePart {
+            content: None,
+            provider_data: None,
+        }],
+        ..Message::text(Role::User, "invalid", "build", None)
+    };
+    let commit = airicode::core::models::SessionCommit::new(
+        1,
+        vec![SessionMutation::MessageAdded { message }],
+    );
+    assert!(state.apply(&commit).is_err());
+    assert!(state.messages.is_empty());
 }

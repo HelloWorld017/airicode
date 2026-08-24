@@ -3,7 +3,8 @@ use std::{path::Path, sync::Arc};
 use airicode::{
     core::{
         models::{
-            ContextPriority, Message, Role, SessionGroupId, SessionId, ToolContext, ToolOutput,
+            ContextPriority, Message, MessagePart, ProviderId, Role, SessionGroupId, SessionId,
+            ToolContext, ToolOutput,
         },
         operations::new_session,
         persistence::SessionStore,
@@ -83,6 +84,44 @@ async fn persisted_session_actor_does_not_advance_when_append_fails() -> Result<
         .await;
     assert!(result.is_ok());
     assert_eq!(session.operations.snapshot().await?.last_sequence, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_data_survives_jsonl_persistence_round_trip() -> Result<()> {
+    let directory = tempdir()?;
+    let group_id = SessionGroupId::new();
+    let session_id = SessionId::new(group_id);
+    let store = JsonlSessionStore::new_at(directory.path().join("provider-data"));
+    let handle = airicode::core::SessionHandle::spawn_with_store(
+        airicode::core::models::SessionState::new(session_id, group_id),
+        Some(Arc::new(store.clone())),
+    );
+    let provider_id = ProviderId::new();
+    let native_item = json!({
+        "type": "reasoning",
+        "id": "rs_1",
+        "encrypted_content": "must-remain-opaque",
+        "summary": []
+    });
+    let message = Message {
+        content: vec![MessagePart::provider_only(provider_id, native_item.clone())],
+        ..Message::text(Role::Assistant, "", "build", None)
+    };
+    handle.operations.add_message(message).await?;
+
+    let commits = store.load(session_id).await?;
+    let encoded = serde_json::to_vec(&commits)?;
+    let decoded: Vec<airicode::core::models::SessionCommit> = serde_json::from_slice(&encoded)?;
+    let airicode::core::models::SessionMutation::MessageAdded { message } =
+        &decoded[0].mutations[0]
+    else {
+        panic!("expected message mutation")
+    };
+    assert_eq!(
+        message.content[0].provider_data.as_ref().unwrap().data,
+        native_item
+    );
     Ok(())
 }
 

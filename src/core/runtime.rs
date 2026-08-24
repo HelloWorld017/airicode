@@ -12,8 +12,8 @@ use super::{
     },
     models::{
         ContextContributionPosition, ContextPriority, ContextSource, FinishReason, Message,
-        MessagePart, ProjectId, ProviderEvent, ProviderRequest, Role, RuntimeEvent, SessionGroupId,
-        SessionId, ToolCallId, ToolOutput, TurnId,
+        MessagePart, MessagePartContent, ProjectId, ProviderEvent, ProviderRequest, Role,
+        RuntimeEvent, SessionGroupId, SessionId, ToolCallId, ToolOutput, TurnId,
     },
     operations::Operations,
     registry::Registry,
@@ -259,6 +259,8 @@ impl TurnEngine {
         let mut text = String::new();
         let mut reasoning = String::new();
         let mut calls: BTreeMap<u32, AssembledCall> = BTreeMap::new();
+        let mut output_parts = BTreeMap::new();
+        let mut has_output_parts = false;
         let mut reason = FinishReason::Stop;
         loop {
             let item = tokio::select! { _ = cancellation.cancelled() => return Err(Error::Cancelled), item = stream.next() => item };
@@ -294,7 +296,6 @@ impl TurnEngine {
                 } => {
                     let call = calls.entry(index).or_insert_with(|| AssembledCall {
                         id: ToolCallId::new(),
-                        provider_id: None,
                         name: String::new(),
                         arguments: String::new(),
                     });
@@ -303,9 +304,12 @@ impl TurnEngine {
                     }
                     if let Some(id) = id {
                         call.id = ToolCallId::from_external(id.clone());
-                        call.provider_id = Some(id);
                     }
                     call.arguments.push_str(&arguments);
+                }
+                ProviderEvent::OutputPart { index, part } => {
+                    has_output_parts = true;
+                    output_parts.insert(index, part);
                 }
                 ProviderEvent::Usage { usage } => {
                     self.operations
@@ -315,22 +319,50 @@ impl TurnEngine {
                 ProviderEvent::Finished { reason: finished } => reason = finished,
             }
         }
-        let mut parts = Vec::new();
-        if !reasoning.is_empty() {
-            parts.push(MessagePart::Reasoning { text: reasoning });
-        }
-        if !text.is_empty() {
-            parts.push(MessagePart::Text { text });
-        }
-        for call in calls.values() {
-            let arguments = serde_json::from_str(&call.arguments)
-                .unwrap_or_else(|_| Value::String(call.arguments.clone()));
-            parts.push(MessagePart::ToolCall {
-                id: call.id.clone(),
-                name: call.name.clone(),
-                arguments,
-            });
-        }
+        let parts = if has_output_parts {
+            let parts = output_parts.into_values().collect::<Vec<_>>();
+            calls = parts
+                .iter()
+                .enumerate()
+                .filter_map(|(index, part)| {
+                    let call = match part.content.as_ref()? {
+                        MessagePartContent::ToolCall {
+                            id,
+                            name,
+                            arguments,
+                        } => AssembledCall {
+                            id: id.clone(),
+                            name: name.clone(),
+                            arguments: match arguments {
+                                Value::String(arguments) => arguments.clone(),
+                                arguments => arguments.to_string(),
+                            },
+                        },
+                        _ => return None,
+                    };
+                    Some((index as u32, call))
+                })
+                .collect();
+            parts
+        } else {
+            let mut parts = Vec::new();
+            if !reasoning.is_empty() {
+                parts.push(MessagePart::reasoning(reasoning));
+            }
+            if !text.is_empty() {
+                parts.push(MessagePart::text(text));
+            }
+            for call in calls.values() {
+                let arguments = serde_json::from_str(&call.arguments)
+                    .unwrap_or_else(|_| Value::String(call.arguments.clone()));
+                parts.push(MessagePart::tool_call(
+                    call.id.clone(),
+                    call.name.clone(),
+                    arguments,
+                ));
+            }
+            parts
+        };
         Ok(CollectedRound {
             parts,
             calls: calls.into_values().collect(),
@@ -411,11 +443,7 @@ impl TurnEngine {
             turn_id: Some(turn_id),
             role: Role::Tool,
             mode,
-            content: vec![MessagePart::ToolResult {
-                call_id,
-                summary,
-                result: output,
-            }],
+            content: vec![MessagePart::tool_result(call_id, summary, output)],
             created_at: super::models::TimeSeq::new(),
             metadata: BTreeMap::new(),
         };
@@ -475,7 +503,6 @@ struct CollectedRound {
 }
 struct AssembledCall {
     id: ToolCallId,
-    provider_id: Option<String>,
     name: String,
     arguments: String,
 }
@@ -503,7 +530,10 @@ mod tests {
 
     fn text(message: &Message) -> &str {
         match &message.content[0] {
-            MessagePart::Text { text } => text,
+            MessagePart {
+                content: Some(MessagePartContent::Text { text }),
+                ..
+            } => text,
             _ => panic!("expected a text message"),
         }
     }

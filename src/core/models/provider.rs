@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::super::error::Result;
 use super::id::ProviderId;
-use super::message::Message;
+use super::message::{Message, MessagePart};
 use super::tool::ToolDefinition;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -59,6 +59,10 @@ pub enum ProviderEvent {
         id: Option<String>,
         name: Option<String>,
         arguments: String,
+    },
+    OutputPart {
+        index: u32,
+        part: MessagePart,
     },
     Usage {
         usage: Usage,

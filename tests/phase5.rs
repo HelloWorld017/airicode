@@ -3,8 +3,8 @@ use std::{path::Path, sync::Arc, time::Duration};
 use airicode::{
     core::{
         models::{
-            ProjectId, ProviderEvent, ProviderId, Role, SessionGroupId, ToolContext, ToolOutput,
-            TurnId,
+            MessagePart, ProjectId, ProviderEvent, ProviderId, Role, SessionGroupId, ToolContext,
+            ToolOutput, TurnId,
         },
         operations::new_session,
         runtime::{TurnEngine, TurnRequest},
@@ -95,11 +95,26 @@ async fn fake_provider_completes_a_read_tool_turn_on_a_real_project() -> Result<
         provider_id,
         [
             vec![
-                ProviderEvent::ToolCallDelta {
+                ProviderEvent::TextDelta {
+                    text: "discarded delta".into(),
+                },
+                ProviderEvent::OutputPart {
                     index: 0,
-                    id: Some("call-1".into()),
-                    name: Some("read".into()),
-                    arguments: "{\"path\":\"hello.txt\"}".into(),
+                    part: MessagePart::tool_call(
+                        airicode::core::models::ToolCallId::from_external("call-1"),
+                        "read".into(),
+                        json!({ "path": "hello.txt" }),
+                    )
+                    .with_provider_data(
+                        provider_id,
+                        json!({
+                            "type": "function_call",
+                            "id": "fc-1",
+                            "call_id": "call-1",
+                            "name": "read",
+                            "arguments": "{\"path\":\"hello.txt\"}"
+                        }),
+                    ),
                 },
                 ProviderEvent::Finished {
                     reason: airicode::core::models::FinishReason::ToolCalls,
@@ -107,7 +122,24 @@ async fn fake_provider_completes_a_read_tool_turn_on_a_real_project() -> Result<
             ],
             vec![
                 ProviderEvent::TextDelta {
-                    text: "The file says hello from project.".into(),
+                    text: "discarded delta".into(),
+                },
+                ProviderEvent::OutputPart {
+                    index: 0,
+                    part: MessagePart::text("The file says hello from project.")
+                        .with_provider_data(
+                            provider_id,
+                            json!({
+                                "type": "message",
+                                "id": "msg-2",
+                                "role": "assistant",
+                                "content": [{
+                                    "type": "output_text",
+                                    "text": "The file says hello from project.",
+                                    "annotations": []
+                                }]
+                            }),
+                        ),
                 },
                 ProviderEvent::Finished {
                     reason: airicode::core::models::FinishReason::Stop,
@@ -154,10 +186,10 @@ async fn fake_provider_completes_a_read_tool_turn_on_a_real_project() -> Result<
         2
     );
     assert!(state.visible_messages().iter().any(|message| {
-        message.content.iter().any(|part| matches!(part, airicode::core::models::MessagePart::ToolResult { result: ToolOutput::Success { content }, .. } if content.contains("hello from project")))
+        message.content.iter().any(|part| matches!(part.content.as_ref(), Some(airicode::core::models::MessagePartContent::ToolResult { result: ToolOutput::Success { content }, .. }) if content.contains("hello from project")))
     }));
     assert!(state.visible_messages().iter().any(|message| {
-        message.content.iter().any(|part| matches!(part, airicode::core::models::MessagePart::Text { text } if text.contains("The file says")))
+        message.content.iter().any(|part| matches!(part.content.as_ref(), Some(airicode::core::models::MessagePartContent::Text { text }) if text.contains("The file says")))
     }));
     Ok(())
 }

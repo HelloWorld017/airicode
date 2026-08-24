@@ -80,6 +80,9 @@ impl SessionState {
                 }
             }
             SessionMutation::MessageAdded { message } => {
+                if message.content.iter().any(|part| !part.is_valid()) {
+                    return Err(Error::InvalidState("message contains an empty part".into()));
+                }
                 if self.messages.contains_key(&message.id) {
                     return Err(Error::InvalidState(format!(
                         "duplicate message {}",

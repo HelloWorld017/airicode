@@ -1,4 +1,7 @@
-use std::sync::{Arc, RwLock};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, RwLock},
+};
 
 use async_stream::try_stream;
 use async_trait::async_trait;
@@ -11,11 +14,13 @@ use crate::core::{
     error::{Error, Result},
     hooks::{ConfigReadContext, ConfigReadHook},
     models::{
-        FinishReason, Message, MessagePart, Model, ModelCapabilities, Plugin, PluginId, Provider,
-        ProviderEvent, ProviderId, ProviderRequest, ProviderStream, Role, Usage,
+        FinishReason, Message, MessagePart, MessagePartContent, Model, ModelCapabilities, Plugin,
+        PluginId, Provider, ProviderEvent, ProviderId, ProviderRequest, ProviderStream, Role,
+        ToolCallId, Usage,
     },
     registry::PluginRegistryScope,
 };
+use uuid::Uuid;
 
 pub struct OpenAiProvider {
     id: ProviderId,
@@ -29,7 +34,7 @@ impl OpenAiProvider {
         Self {
             id,
             api_key: Arc::new(RwLock::new(api_key.into())),
-            base_url: Arc::new(RwLock::new("https://openrouter.ai/v1".into())),
+            base_url: Arc::new(RwLock::new("https://api.openai.com/v1".into())),
             client: Client::new(),
         }
     }
@@ -90,45 +95,6 @@ struct ModelRecord {
     id: String,
 }
 
-#[derive(Deserialize)]
-struct ChatChunk {
-    choices: Vec<Choice>,
-    usage: Option<UsageRecord>,
-}
-
-#[derive(Deserialize)]
-struct Choice {
-    delta: Option<Delta>,
-    finish_reason: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct Delta {
-    content: Option<String>,
-    reasoning_content: Option<String>,
-    tool_calls: Option<Vec<ToolCallDeltaRecord>>,
-}
-
-#[derive(Deserialize)]
-struct ToolCallDeltaRecord {
-    index: u32,
-    id: Option<String>,
-    function: Option<FunctionDeltaRecord>,
-}
-
-#[derive(Deserialize)]
-struct FunctionDeltaRecord {
-    name: Option<String>,
-    arguments: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct UsageRecord {
-    prompt_tokens: u64,
-    completion_tokens: u64,
-    total_tokens: u64,
-}
-
 #[async_trait]
 impl Provider for OpenAiProvider {
     fn id(&self) -> ProviderId {
@@ -164,23 +130,11 @@ impl Provider for OpenAiProvider {
     }
 
     async fn request(&self, request: ProviderRequest) -> Result<ProviderStream> {
-        let body = json!({
-            "model": request.model,
-            "messages": request.messages.iter().map(|message| openai_message(message)).collect::<Vec<_>>(),
-            "tools": request.tools.iter().map(|tool| json!({
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.input_schema,
-                }
-            })).collect::<Vec<_>>(),
-            "stream": true,
-            "stream_options": { "include_usage": true },
-        });
+        let provider_id = self.id;
+        let body = responses_body(&request, provider_id);
         let response = self
             .client
-            .post(self.endpoint("/chat/completions"))
+            .post(self.endpoint("/responses"))
             .bearer_auth(self.api_key())
             .json(&body)
             .send()
@@ -191,17 +145,23 @@ impl Provider for OpenAiProvider {
         let cancellation = request.cancellation;
         let stream = try_stream! {
             let mut buffer = Vec::new();
+            let mut output_items = BTreeMap::new();
+            let mut saw_function_call = false;
             let mut done = false;
             while !done {
                 let chunk = tokio::select! {
                     _ = cancellation.cancelled() => Some(Err(Error::Cancelled)),
                     chunk = bytes.next() => chunk.map(|value| value.map_err(|error| Error::Provider(format!("OpenAI stream failed: {error}")))),
                 };
-                let Some(chunk) = chunk else {
-                    break;
-                };
-                let chunk = chunk?;
-                buffer.extend_from_slice(&chunk);
+                if let Some(chunk) = chunk {
+                    let chunk = chunk?;
+                    buffer.extend_from_slice(&chunk);
+                } else {
+                    if buffer.is_empty() {
+                        break;
+                    }
+                    buffer.push(b'\n');
+                }
                 while let Some(position) = buffer.iter().position(|byte| *byte == b'\n') {
                     let line = buffer.drain(..=position).collect::<Vec<_>>();
                     let line = String::from_utf8_lossy(&line);
@@ -217,36 +177,16 @@ impl Provider for OpenAiProvider {
                     if data.is_empty() {
                         continue;
                     }
-                    let chunk = serde_json::from_str::<ChatChunk>(data)
-                        .map_err(|error| Error::Provider(format!("invalid OpenAI stream chunk: {error}")))?;
-                    if let Some(usage) = chunk.usage {
-                        yield ProviderEvent::Usage { usage: Usage {
-                            input_tokens: usage.prompt_tokens,
-                            output_tokens: usage.completion_tokens,
-                            total_tokens: usage.total_tokens,
-                        }};
-                    }
-                    for choice in chunk.choices {
-                        if let Some(delta) = choice.delta {
-                            if let Some(text) = delta.content.filter(|text| !text.is_empty()) {
-                                yield ProviderEvent::TextDelta { text };
-                            }
-                            if let Some(text) = delta.reasoning_content.filter(|text| !text.is_empty()) {
-                                yield ProviderEvent::ReasoningDelta { text };
-                            }
-                            for call in delta.tool_calls.unwrap_or_default() {
-                                let function = call.function;
-                                yield ProviderEvent::ToolCallDelta {
-                                    index: call.index,
-                                    id: call.id,
-                                    name: function.as_ref().and_then(|value| value.name.clone()),
-                                    arguments: function.and_then(|value| value.arguments).unwrap_or_default(),
-                                };
-                            }
-                        }
-                        if let Some(reason) = choice.finish_reason {
-                            yield ProviderEvent::Finished { reason: finish_reason(&reason) };
-                        }
+                    let event = serde_json::from_str::<Value>(data).map_err(|error| {
+                        Error::Provider(format!("invalid OpenAI Responses event: {error}"))
+                    })?;
+                    for event in response_events(
+                        event,
+                        provider_id,
+                        &mut output_items,
+                        &mut saw_function_call,
+                    )? {
+                        yield event;
                     }
                 }
             }
@@ -255,57 +195,297 @@ impl Provider for OpenAiProvider {
     }
 }
 
-fn openai_message(message: &Message) -> Value {
-    let mut text = String::new();
-    let mut tool_calls = Vec::new();
-    let mut tool_result = None;
-    for part in &message.content {
-        match part {
-            MessagePart::Text { text: value } | MessagePart::Reasoning { text: value } => {
-                text.push_str(value)
+fn responses_body(request: &ProviderRequest, provider_id: ProviderId) -> Value {
+    json!({
+        "model": request.model,
+        "input": responses_input(&request.messages, provider_id),
+        "tools": request.tools.iter().map(|tool| json!({
+            "type": "function",
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.input_schema,
+        })).collect::<Vec<_>>(),
+        "stream": true,
+        "store": false,
+        "include": ["reasoning.encrypted_content"],
+        "reasoning": { "summary": "auto" },
+    })
+}
+
+fn responses_input(messages: &[std::sync::Arc<Message>], provider_id: ProviderId) -> Vec<Value> {
+    let mut input = Vec::new();
+    for message in messages {
+        for part in &message.content {
+            if let Some(provider_data) = &part.provider_data {
+                if provider_data.provider_id == provider_id {
+                    input.push(provider_data.data.clone());
+                    continue;
+                }
             }
-            MessagePart::ToolCall {
-                id,
-                name,
-                arguments,
-            } => tool_calls.push(json!({
-                "id": id.to_string(),
-                "type": "function",
-                "function": { "name": name, "arguments": arguments.to_string() }
-            })),
-            MessagePart::ToolResult {
-                call_id, result, ..
-            } => {
-                let content = result.content().unwrap_or("").to_string();
-                tool_result = Some((call_id.to_string(), content));
+
+            let Some(content) = &part.content else {
+                continue;
+            };
+            match content {
+                MessagePartContent::Text { text } => input.push(json!({
+                    "type": "message",
+                    "role": response_role(message.role.clone()),
+                    "content": [{ "type": "input_text", "text": text }],
+                })),
+                MessagePartContent::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                } => input.push(json!({
+                    "type": "function_call",
+                    "call_id": id.to_string(),
+                    "name": name,
+                    "arguments": response_arguments(arguments),
+                })),
+                MessagePartContent::ToolResult {
+                    call_id, result, ..
+                } => input.push(json!({
+                    "type": "function_call_output",
+                    "call_id": call_id.to_string(),
+                    "output": result.content().unwrap_or(""),
+                })),
+                MessagePartContent::Reasoning { .. } => {}
             }
         }
     }
-    if let Some((call_id, content)) = tool_result {
-        json!({ "role": "tool", "tool_call_id": call_id, "content": content })
-    } else {
-        let role = match message.role {
-            Role::System => "system",
-            Role::User => "user",
-            Role::Assistant => "assistant",
-            Role::Tool => "tool",
-        };
-        let mut value = json!({ "role": role, "content": text });
-        if !tool_calls.is_empty() {
-            value["tool_calls"] = Value::Array(tool_calls);
-        }
-        value
+    input
+}
+
+fn response_role(role: Role) -> &'static str {
+    match role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "user",
     }
 }
 
-fn finish_reason(reason: &str) -> FinishReason {
-    match reason {
-        "stop" => FinishReason::Stop,
-        "length" => FinishReason::Length,
-        "tool_calls" | "function_call" => FinishReason::ToolCalls,
-        "content_filter" => FinishReason::ContentFilter,
-        other => FinishReason::Other(other.to_string()),
+fn response_arguments(arguments: &Value) -> String {
+    match arguments {
+        Value::String(arguments) => arguments.clone(),
+        arguments => arguments.to_string(),
     }
+}
+
+fn response_events(
+    event: Value,
+    provider_id: ProviderId,
+    output_items: &mut BTreeMap<u32, Value>,
+    saw_function_call: &mut bool,
+) -> Result<Vec<ProviderEvent>> {
+    let kind = event
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Provider("OpenAI Responses event has no type".into()))?;
+    let mut result = Vec::new();
+    match kind {
+        "response.output_item.added" => {
+            let index = required_u32(&event, "output_index")?;
+            let item = event
+                .get("item")
+                .cloned()
+                .ok_or_else(|| Error::Provider("output item event has no item".into()))?;
+            *saw_function_call |= item.get("type").and_then(Value::as_str) == Some("function_call");
+            output_items.insert(index, item);
+        }
+        "response.output_item.done" => {
+            let index = required_u32(&event, "output_index")?;
+            let item = event
+                .get("item")
+                .cloned()
+                .ok_or_else(|| Error::Provider("output item event has no item".into()))?;
+            *saw_function_call |= item.get("type").and_then(Value::as_str) == Some("function_call");
+            output_items.insert(index, item.clone());
+            result.push(ProviderEvent::OutputPart {
+                index,
+                part: output_item_part(provider_id, item),
+            });
+        }
+        "response.output_text.delta" => {
+            let delta = required_string(&event, "delta")?;
+            if !delta.is_empty() {
+                result.push(ProviderEvent::TextDelta { text: delta });
+            }
+        }
+        "response.reasoning_summary_text.delta" => {
+            let delta = required_string(&event, "delta")?;
+            if !delta.is_empty() {
+                result.push(ProviderEvent::ReasoningDelta { text: delta });
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            let index = required_u32(&event, "output_index")?;
+            let item = output_items.get(&index);
+            result.push(ProviderEvent::ToolCallDelta {
+                index,
+                id: item
+                    .and_then(|item| item.get("call_id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                name: item
+                    .and_then(|item| item.get("name"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                arguments: required_string(&event, "delta")?,
+            });
+        }
+        "response.completed" => {
+            append_usage(&mut result, event.get("response"))?;
+            result.push(ProviderEvent::Finished {
+                reason: if *saw_function_call {
+                    FinishReason::ToolCalls
+                } else {
+                    FinishReason::Stop
+                },
+            });
+        }
+        "response.incomplete" => {
+            append_usage(&mut result, event.get("response"))?;
+            let reason = event
+                .get("response")
+                .and_then(|response| response.get("incomplete_details"))
+                .and_then(|details| details.get("reason"))
+                .and_then(Value::as_str)
+                .unwrap_or("incomplete");
+            result.push(ProviderEvent::Finished {
+                reason: if reason == "max_output_tokens" || reason == "content_filter" {
+                    if reason == "max_output_tokens" {
+                        FinishReason::Length
+                    } else {
+                        FinishReason::ContentFilter
+                    }
+                } else {
+                    FinishReason::Other(reason.to_string())
+                },
+            });
+        }
+        "response.failed" | "error" => {
+            let message = event
+                .get("response")
+                .and_then(|response| response.get("error"))
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    event
+                        .get("error")
+                        .and_then(|error| error.get("message"))
+                        .and_then(Value::as_str)
+                })
+                .or_else(|| event.get("message").and_then(Value::as_str))
+                .unwrap_or("OpenAI Responses request failed");
+            return Err(Error::Provider(message.to_string()));
+        }
+        _ => {}
+    }
+    Ok(result)
+}
+
+fn output_item_part(provider_id: ProviderId, item: Value) -> MessagePart {
+    match item.get("type").and_then(Value::as_str) {
+        Some("message") => {
+            let text = item
+                .get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|content| {
+                    content.get("type").and_then(Value::as_str) == Some("output_text")
+                })
+                .filter_map(|content| content.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("");
+            if text.is_empty() {
+                MessagePart::provider_only(provider_id, item)
+            } else {
+                MessagePart::text(text).with_provider_data(provider_id, item)
+            }
+        }
+        Some("reasoning") => {
+            let summary = item
+                .get("summary")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|summary| summary.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if summary.is_empty() {
+                MessagePart::provider_only(provider_id, item)
+            } else {
+                MessagePart::reasoning(summary).with_provider_data(provider_id, item)
+            }
+        }
+        Some("function_call") => {
+            let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
+                return MessagePart::provider_only(provider_id, item);
+            };
+            let Some(name) = item.get("name").and_then(Value::as_str) else {
+                return MessagePart::provider_only(provider_id, item);
+            };
+            let arguments = item
+                .get("arguments")
+                .and_then(Value::as_str)
+                .map(|arguments| {
+                    serde_json::from_str(arguments)
+                        .unwrap_or_else(|_| Value::String(arguments.to_string()))
+                })
+                .unwrap_or(Value::Null);
+            MessagePart::tool_call(
+                ToolCallId::from_external(call_id),
+                name.to_string(),
+                arguments,
+            )
+            .with_provider_data(provider_id, item)
+        }
+        _ => MessagePart::provider_only(provider_id, item),
+    }
+}
+
+fn required_u32(event: &Value, field: &str) -> Result<u32> {
+    event
+        .get(field)
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| Error::Provider(format!("OpenAI Responses event has no valid {field}")))
+}
+
+fn required_string(event: &Value, field: &str) -> Result<String> {
+    event
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| Error::Provider(format!("OpenAI Responses event has no valid {field}")))
+}
+
+fn append_usage(events: &mut Vec<ProviderEvent>, response: Option<&Value>) -> Result<()> {
+    let Some(usage) = response.and_then(|response| response.get("usage")) else {
+        return Ok(());
+    };
+    let input_tokens = usage
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| Error::Provider("OpenAI Responses usage has no input_tokens".into()))?;
+    let output_tokens = usage
+        .get("output_tokens")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| Error::Provider("OpenAI Responses usage has no output_tokens".into()))?;
+    let total_tokens = usage
+        .get("total_tokens")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| Error::Provider("OpenAI Responses usage has no total_tokens".into()))?;
+    events.push(ProviderEvent::Usage {
+        usage: Usage {
+            input_tokens,
+            output_tokens,
+            total_tokens,
+        },
+    });
+    Ok(())
 }
 
 async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response> {
@@ -315,6 +495,13 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     Err(Error::Provider(format!("OpenAI returned {status}: {body}")))
+}
+
+fn stable_openai_provider_id() -> ProviderId {
+    ProviderId::from_uuid(Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        b"airicode/provider/openai",
+    ))
 }
 
 pub struct OpenAiProviderPlugin {
@@ -327,7 +514,7 @@ impl OpenAiProviderPlugin {
     pub fn new() -> Self {
         Self {
             id: PluginId::new(),
-            provider_id: ProviderId::new(),
+            provider_id: stable_openai_provider_id(),
             provider: RwLock::new(None),
         }
     }
@@ -401,6 +588,178 @@ impl ConfigReadHook for OpenAiProviderPlugin {
             .provider
             .write()
             .map_err(|_| Error::Plugin("OpenAI provider lock poisoned".into()))? = Some(provider);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::core::models::{ToolDefinition, ToolOutput};
+    use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn responses_input_replays_matching_native_items_and_encodes_semantics() {
+        let provider_id = ProviderId::new();
+        let other_provider = ProviderId::new();
+        let native = serde_json::json!({
+            "type": "message",
+            "id": "msg_native",
+            "role": "assistant",
+            "content": []
+        });
+        let mut native_message = Message::text(Role::Assistant, "ignored", "build", None);
+        native_message.content[0] =
+            MessagePart::text("ignored").with_provider_data(provider_id, native.clone());
+        let mut other_message = Message::text(Role::Assistant, "visible", "build", None);
+        other_message.content[0] = MessagePart::text("visible")
+            .with_provider_data(other_provider, serde_json::json!({ "opaque": true }));
+        let reasoning = Message {
+            content: vec![MessagePart::reasoning("do not synthesize")],
+            ..Message::text(Role::Assistant, "", "build", None)
+        };
+        let result = Message {
+            content: vec![MessagePart::tool_result(
+                ToolCallId::from_external("call_1"),
+                "ok".into(),
+                ToolOutput::Success {
+                    content: "tool output".into(),
+                },
+            )],
+            ..Message::text(Role::Tool, "", "build", None)
+        };
+
+        let input = responses_input(
+            &[
+                Arc::new(native_message),
+                Arc::new(other_message),
+                Arc::new(reasoning),
+                Arc::new(result),
+            ],
+            provider_id,
+        );
+
+        assert_eq!(input[0], native);
+        assert_eq!(input[1]["role"], "assistant");
+        assert_eq!(input[1]["content"][0]["text"], "visible");
+        assert_eq!(input[2]["type"], "function_call_output");
+        assert_eq!(input[2]["call_id"], "call_1");
+        assert_eq!(input[2]["output"], "tool output");
+        assert_eq!(input.len(), 3);
+    }
+
+    #[test]
+    fn responses_body_uses_stateless_streaming_configuration() {
+        let request = ProviderRequest {
+            model: "gpt-test".into(),
+            messages: vec![Arc::new(Message::text(Role::User, "hello", "build", None))],
+            tools: vec![ToolDefinition {
+                name: "read".into(),
+                description: "read a file".into(),
+                input_schema: serde_json::json!({ "type": "object" }),
+            }],
+            cancellation: CancellationToken::new(),
+        };
+        let body = responses_body(&request, ProviderId::new());
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["store"], false);
+        assert_eq!(body["include"][0], "reasoning.encrypted_content");
+        assert_eq!(body["reasoning"]["summary"], "auto");
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["name"], "read");
+        assert!(body.get("previous_response_id").is_none());
+    }
+
+    #[test]
+    fn response_output_items_preserve_native_data_and_call_ids() -> crate::Result<()> {
+        let provider_id = ProviderId::new();
+        let reasoning_item = serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_1",
+            "summary": [{ "type": "summary_text", "text": "summary" }],
+            "encrypted_content": "encrypted"
+        });
+        let function_item = serde_json::json!({
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": "call_1",
+            "name": "read",
+            "arguments": "{\"path\":\"README.md\"}"
+        });
+        let mut output_items = BTreeMap::new();
+        let mut saw_function_call = false;
+        let reasoning_events = response_events(
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": reasoning_item
+            }),
+            provider_id,
+            &mut output_items,
+            &mut saw_function_call,
+        )?;
+        let function_events = response_events(
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": 1,
+                "item": function_item
+            }),
+            provider_id,
+            &mut output_items,
+            &mut saw_function_call,
+        )?;
+
+        let ProviderEvent::OutputPart { part, .. } = &reasoning_events[0] else {
+            panic!("expected finalized reasoning part")
+        };
+        assert!(matches!(
+            part.content.as_ref(),
+            Some(MessagePartContent::Reasoning { text }) if text == "summary"
+        ));
+        assert_eq!(part.provider_data.as_ref().unwrap().data, reasoning_item);
+
+        let ProviderEvent::OutputPart { part, .. } = &function_events[0] else {
+            panic!("expected finalized function part")
+        };
+        assert!(matches!(
+            part.content.as_ref(),
+            Some(MessagePartContent::ToolCall { id, name, arguments })
+                if id.to_string() == "call_1"
+                    && name == "read"
+                    && arguments["path"] == "README.md"
+        ));
+        assert_eq!(part.provider_data.as_ref().unwrap().data, function_item);
+        assert!(saw_function_call);
+        Ok(())
+    }
+
+    #[test]
+    fn encrypted_only_and_unknown_items_become_provider_only_parts() -> crate::Result<()> {
+        let provider_id = ProviderId::new();
+        for item in [
+            serde_json::json!({ "type": "reasoning", "encrypted_content": "opaque" }),
+            serde_json::json!({ "type": "unknown_item", "value": 1 }),
+        ] {
+            let mut output_items = BTreeMap::new();
+            let mut saw_function_call = false;
+            let events = response_events(
+                serde_json::json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": item
+                }),
+                provider_id,
+                &mut output_items,
+                &mut saw_function_call,
+            )?;
+            let ProviderEvent::OutputPart { part, .. } = &events[0] else {
+                panic!("expected finalized part")
+            };
+            assert!(part.content.is_none());
+            assert!(part.provider_data.is_some());
+        }
         Ok(())
     }
 }
