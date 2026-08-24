@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::id::NoteId;
 use super::message::Metadata;
+use crate::utils::TimeSeq;
 
 pub type NoteMetadata = Metadata;
 
@@ -16,6 +17,6 @@ pub enum NoteContent {
 pub struct Note {
     pub id: NoteId,
     pub content: NoteContent,
-    pub created_at_ms: u64,
+    pub created_at: TimeSeq,
     pub metadata: Metadata,
 }

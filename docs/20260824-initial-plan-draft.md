@@ -192,7 +192,7 @@ struct Message {
     id: MessageId,
     role: Role,
     content: Vec<MessagePart>,
-    created_at_ms: u64,
+    created_at: TimeSeq,
     metadata: MessageMetadata,
 }
 
@@ -217,7 +217,7 @@ type NoteMetadata = BTreeMap<String, Value>;
 struct Note {
     id: NoteId,
     content: NoteContent,
-    created_at_ms: u64,
+    created_at: TimeSeq,
     metadata: NoteMetadata,
 }
 
@@ -225,6 +225,7 @@ struct Note {
 struct ContextPart {
     priority: ContextPriority,
     source: ContextSource,
+    created_at: TimeSeq,
 }
 
 enum ContextPriority {

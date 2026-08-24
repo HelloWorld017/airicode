@@ -1,7 +1,5 @@
 use super::error::{Error, Result};
-use super::models::{
-    ContextSource, SessionCommit, SessionMutation, SessionState, TimelineEntry, TimelineItem,
-};
+use super::models::{ContextSource, SessionCommit, SessionMutation, SessionState};
 
 impl SessionState {
     pub fn new(
@@ -16,29 +14,30 @@ impl SessionState {
             context: Default::default(),
             notes: Default::default(),
             ui: Default::default(),
-            timeline: Vec::new(),
             last_sequence: 0,
         }
     }
 
     pub fn active_context(&self) -> Vec<super::models::ContextPart> {
-        self.context
+        let mut context = self
+            .context
             .values()
             .filter(|part| !part.invalidated)
             .cloned()
-            .collect()
+            .collect::<Vec<_>>();
+        context.sort_by_key(|part| part.created_at);
+        context
     }
 
     pub fn visible_messages(&self) -> Vec<&super::models::Message> {
-        self.timeline
+        let mut messages = self
+            .messages
             .iter()
-            .filter_map(|entry| match entry.item {
-                TimelineItem::Message(id) if !self.invalidated_messages.contains(&id) => {
-                    self.messages.get(&id)
-                }
-                _ => None,
-            })
-            .collect()
+            .filter(|(id, _)| !self.invalidated_messages.contains(id))
+            .map(|(_, message)| message)
+            .collect::<Vec<_>>();
+        messages.sort_by_key(|message| message.created_at);
+        messages
     }
 
     pub fn apply(&mut self, commit: &SessionCommit) -> Result<()> {
@@ -51,14 +50,14 @@ impl SessionState {
         }
         let mut next = self.clone();
         for mutation in &commit.mutations {
-            next.apply_mutation(commit.sequence, mutation)?;
+            next.apply_mutation(mutation)?;
         }
         next.last_sequence = commit.sequence;
         *self = next;
         Ok(())
     }
 
-    fn apply_mutation(&mut self, sequence: u64, mutation: &SessionMutation) -> Result<()> {
+    fn apply_mutation(&mut self, mutation: &SessionMutation) -> Result<()> {
         match mutation {
             SessionMutation::SessionCreated {
                 session_id,
@@ -76,10 +75,6 @@ impl SessionState {
                     )));
                 }
                 self.messages.insert(message.id, message.clone());
-                self.timeline.push(TimelineEntry {
-                    sequence,
-                    item: TimelineItem::Message(message.id),
-                });
             }
             SessionMutation::MessageInvalidated { message_id } => {
                 if !self.messages.contains_key(message_id) {
@@ -117,10 +112,6 @@ impl SessionState {
                     return Err(Error::InvalidState(format!("duplicate note {}", note.id)));
                 }
                 self.notes.insert(note.id, note.clone());
-                self.timeline.push(TimelineEntry {
-                    sequence,
-                    item: TimelineItem::Note(note.id),
-                });
             }
             SessionMutation::NoteUpdated {
                 note_id,

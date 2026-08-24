@@ -460,7 +460,7 @@ struct Message {
     turn_id: Option<TurnId>,
     role: Role,
     content: Vec<MessagePart>,
-    created_at_ms: u64,
+    created_at: TimeSeq,
     metadata: MessageMetadata,
 }
 ```
@@ -507,7 +507,7 @@ type NoteMetadata = BTreeMap<String, Value>;
 struct Note {
     id: NoteId,
     content: NoteContent,
-    created_at_ms: u64,
+    created_at: TimeSeq,
     metadata: NoteMetadata,
 }
 ```
@@ -538,29 +538,13 @@ Note는 기본적으로 Context에 자동 삽입하지 않는다.
 
 ---
 
-# 9. Timeline
+# 9. Ordering
 
-Message와 Note는 TUI에서 같은 수준에 섞여 표시된다.
+Message, Note, ContextPart의 생성 시각은 `TimeSeq`로 기록한다.
+`TimeSeq`는 millisecond timestamp와 같은 시각 안의 sequence를 함께 가지므로,
+별도의 순서 모델 없이도 복구 후 동일한 순서를 재현할 수 있다.
 
-`created_at_ms`만으로는 같은 millisecond의 순서를 보장하기 어렵다.
-
-다음 중 하나를 사용해 stable ordering을 보장한다.
-
-```rust
-enum TimelineItem {
-    Message(MessageId),
-    Note(NoteId),
-}
-
-struct TimelineEntry {
-    sequence: u64,
-    item: TimelineItem,
-}
-```
-
-또는 SessionCommit mutation sequence에서 deterministic ordering을 파생한다.
-
-복구 후에도 이전과 동일한 timeline 순서가 나와야 한다.
+Context는 `ContextPriority`가 아니라 `created_at` 순으로 정렬한다.
 
 ---
 
@@ -571,6 +555,7 @@ struct ContextPart {
     id: ContextPartId,
     priority: ContextPriority,
     source: ContextSource,
+    created_at: TimeSeq,
     metadata: BTreeMap<String, Value>,
 }
 
@@ -1400,7 +1385,7 @@ Core의 durable state 변경 자체를 commit으로 표현한다.
 struct SessionCommit {
     sequence: u64,
     commit_id: CommitId,
-    created_at_ms: u64,
+    created_at: TimeSeq,
     mutations: Vec<SessionMutation>,
 }
 
@@ -2113,7 +2098,7 @@ src/ui/terminal/
 
 ## 33.2 messages
 
-timeline rendering:
+created_at 순 rendering:
 
 - User
 - Assistant
@@ -2511,7 +2496,7 @@ SessionState::apply
 - mutation replay
 - invalidation
 - serde roundtrip
-- stable timeline
+- stable TimeSeq ordering
 - bad sequence rejection
 
 ### 완료 조건
@@ -2642,7 +2627,7 @@ Core를 drop/kill 후 새 instance가 동일 durable Session snapshot을 복원.
 
 - app event loop
 - statusbar
-- Message/Note timeline
+- Message/Note rendering by TimeSeq
 - streaming draft
 - editor
 - basic command autocomplete
@@ -3110,7 +3095,7 @@ AiriCode Greenfield M1
 6. Assistant가 read 또는 shell을 호출한다.
 7. Tool이 Workdir을 통해 실행된다.
 8. ToolResult를 받은 Provider가 답변을 마친다.
-9. UI에 전체 timeline이 표시된다.
+9. UI에 전체 Message/Note가 TimeSeq 순으로 표시된다.
 10. 프로세스를 강제로 종료한다.
 11. AiriCode를 다시 실행한다.
 12. durable Session / Message / Note / Context가 정확히 복구된다.

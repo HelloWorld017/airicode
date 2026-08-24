@@ -6,20 +6,8 @@ use super::context::ContextPart;
 use super::id::{CommitId, ContextPartId, MessageId, NoteId, SessionGroupId, SessionId};
 use super::message::Message;
 use super::note::{Note, NoteContent};
-use super::now_ms;
 use super::ui_state::UIState;
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum TimelineItem {
-    Message(MessageId),
-    Note(NoteId),
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TimelineEntry {
-    pub sequence: u64,
-    pub item: TimelineItem,
-}
+use crate::utils::TimeSeq;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionState {
@@ -30,7 +18,6 @@ pub struct SessionState {
     pub context: BTreeMap<ContextPartId, ContextPart>,
     pub notes: BTreeMap<NoteId, Note>,
     pub ui: UIState,
-    pub timeline: Vec<TimelineEntry>,
     pub last_sequence: u64,
 }
 
@@ -69,7 +56,7 @@ pub enum SessionMutation {
 pub struct SessionCommit {
     pub sequence: u64,
     pub commit_id: CommitId,
-    pub created_at_ms: u64,
+    pub created_at: TimeSeq,
     pub mutations: Vec<SessionMutation>,
 }
 
@@ -78,7 +65,7 @@ impl SessionCommit {
         Self {
             sequence,
             commit_id: CommitId::new(),
-            created_at_ms: now_ms(),
+            created_at: TimeSeq::new(),
             mutations,
         }
     }

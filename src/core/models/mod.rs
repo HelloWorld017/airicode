@@ -13,6 +13,7 @@ pub mod tool;
 pub mod ui_state;
 pub mod workdir;
 
+pub use crate::utils::TimeSeq;
 pub use command::*;
 pub use context::*;
 pub use events::*;
@@ -27,10 +28,3 @@ pub use session_group::*;
 pub use tool::*;
 pub use ui_state::*;
 pub use workdir::*;
-
-pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or_default()
-}

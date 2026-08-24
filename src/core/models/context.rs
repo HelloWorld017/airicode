@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::id::{ContextPartId, MessageId};
 use super::message::Metadata;
+use crate::utils::TimeSeq;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ContextPriority {
@@ -21,6 +22,7 @@ pub struct ContextPart {
     pub id: ContextPartId,
     pub priority: ContextPriority,
     pub source: ContextSource,
+    pub created_at: TimeSeq,
     pub metadata: Metadata,
     pub invalidated: bool,
 }

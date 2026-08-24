@@ -3,8 +3,8 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use super::id::{MessageId, ToolCallId, TurnId};
-use super::now_ms;
 use super::tool::ToolOutput;
+use crate::utils::TimeSeq;
 
 pub type Metadata = BTreeMap<String, Value>;
 pub type MessageMetadata = Metadata;
@@ -43,7 +43,7 @@ pub struct Message {
     pub turn_id: Option<TurnId>,
     pub role: Role,
     pub content: Vec<MessagePart>,
-    pub created_at_ms: u64,
+    pub created_at: TimeSeq,
     pub metadata: Metadata,
 }
 
@@ -54,7 +54,7 @@ impl Message {
             turn_id,
             role,
             content: vec![MessagePart::Text { text: text.into() }],
-            created_at_ms: now_ms(),
+            created_at: TimeSeq::new(),
             metadata: Metadata::new(),
         }
     }

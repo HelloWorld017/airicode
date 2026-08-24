@@ -102,9 +102,7 @@ impl TurnEngine {
             }
             let state = self.operations.snapshot().await?;
             let mut messages = Vec::new();
-            let mut context = state.active_context();
-            context.sort_by_key(|part| (priority_order(part.priority), part.id));
-            for part in context {
+            for part in state.active_context() {
                 match part.source {
                     ContextSource::Message(id) => {
                         if let Some(message) = state.messages.get(&id) {
@@ -176,7 +174,7 @@ impl TurnEngine {
                 turn_id: Some(turn_id),
                 role: Role::Assistant,
                 content: round.parts,
-                created_at_ms: super::models::now_ms(),
+                created_at: super::models::TimeSeq::new(),
                 metadata: BTreeMap::new(),
             };
             let assistant_parts = assistant.content.clone();
@@ -408,21 +406,13 @@ impl TurnEngine {
                 summary,
                 result: output,
             }],
-            created_at_ms: super::models::now_ms(),
+            created_at: super::models::TimeSeq::new(),
             metadata: BTreeMap::new(),
         };
         self.operations
             .add_conversation_message(message, ContextPriority::High)
             .await?;
         Ok(())
-    }
-}
-
-fn priority_order(priority: ContextPriority) -> u8 {
-    match priority {
-        ContextPriority::Persistent => 0,
-        ContextPriority::High => 1,
-        ContextPriority::Low => 2,
     }
 }
 

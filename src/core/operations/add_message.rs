@@ -2,6 +2,7 @@ use crate::core::error::Result;
 use crate::core::models::{
     ContextPart, ContextPartId, ContextPriority, ContextSource, Message, MessageId, SessionMutation,
 };
+use crate::utils::TimeSeq;
 
 use super::Operations;
 
@@ -24,6 +25,7 @@ impl Operations {
             id: ContextPartId::new(),
             priority,
             source: ContextSource::Message(message_id),
+            created_at: TimeSeq::new(),
             metadata: Default::default(),
             invalidated: false,
         };

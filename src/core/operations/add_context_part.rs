@@ -1,6 +1,6 @@
 use crate::core::error::Result;
 use crate::core::models::{
-    ContextPart, ContextPartId, ContextPriority, ContextSource, SessionMutation,
+    ContextPart, ContextPartId, ContextPriority, ContextSource, SessionMutation, TimeSeq,
 };
 
 use super::Operations;
@@ -16,6 +16,7 @@ impl Operations {
             id: ContextPartId::new(),
             priority,
             source,
+            created_at: TimeSeq::new(),
             metadata: metadata.into_iter().collect(),
             invalidated: false,
         };

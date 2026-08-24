@@ -1,5 +1,5 @@
 use crate::core::error::Result;
-use crate::core::models::{now_ms, Note, NoteContent, NoteId, SessionMutation};
+use crate::core::models::{Note, NoteContent, NoteId, SessionMutation, TimeSeq};
 
 use super::Operations;
 
@@ -12,7 +12,7 @@ impl Operations {
         let note = Note {
             id: NoteId::new(),
             content,
-            created_at_ms: now_ms(),
+            created_at: TimeSeq::new(),
             metadata: metadata.into_iter().collect(),
         };
         let id = note.id;

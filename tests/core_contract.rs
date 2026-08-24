@@ -21,6 +21,7 @@ fn reducer_replays_atomic_conversation_and_invalidation() -> airicode::Result<()
         id: airicode::core::models::ContextPartId::new(),
         priority: ContextPriority::High,
         source: ContextSource::Message(message.id),
+        created_at: airicode::utils::TimeSeq::new(),
         metadata: Default::default(),
         invalidated: false,
     };
@@ -50,6 +51,52 @@ fn reducer_replays_atomic_conversation_and_invalidation() -> airicode::Result<()
     assert!(state.visible_messages().is_empty());
     assert_eq!(state.active_context().len(), 1);
     assert_eq!(state.last_sequence, 2);
+    Ok(())
+}
+
+#[test]
+fn context_is_sorted_by_time_sequence_not_priority() -> airicode::Result<()> {
+    let session_id = SessionId::new();
+    let group_id = SessionGroupId::new();
+    let older_message = Message::text(Role::User, "older", None);
+    let newer_message = Message::text(Role::User, "newer", None);
+    let older_message_id = older_message.id;
+    let newer_message_id = newer_message.id;
+    let older_part = airicode::core::models::ContextPart {
+        id: airicode::core::models::ContextPartId::new(),
+        priority: ContextPriority::Low,
+        source: ContextSource::Message(older_message_id),
+        created_at: airicode::utils::TimeSeq::from_parts(10, 0),
+        metadata: Default::default(),
+        invalidated: false,
+    };
+    let newer_part = airicode::core::models::ContextPart {
+        id: airicode::core::models::ContextPartId::new(),
+        priority: ContextPriority::Persistent,
+        source: ContextSource::Message(newer_message_id),
+        created_at: airicode::utils::TimeSeq::from_parts(20, 0),
+        metadata: Default::default(),
+        invalidated: false,
+    };
+    let commit = airicode::core::models::SessionCommit::new(
+        1,
+        vec![
+            SessionMutation::MessageAdded {
+                message: older_message,
+            },
+            SessionMutation::MessageAdded {
+                message: newer_message,
+            },
+            SessionMutation::ContextPartAdded { part: newer_part },
+            SessionMutation::ContextPartAdded { part: older_part },
+        ],
+    );
+    let mut state = SessionState::new(session_id, group_id);
+    state.apply(&commit)?;
+
+    let context = state.active_context();
+    assert_eq!(context[0].source, ContextSource::Message(older_message_id));
+    assert_eq!(context[1].source, ContextSource::Message(newer_message_id));
     Ok(())
 }
 
