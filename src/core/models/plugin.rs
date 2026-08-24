@@ -3,9 +3,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use super::error::Result;
-use super::models::PluginId;
-use super::registry::PluginRegistryScope;
+use super::super::error::Result;
+use super::super::registry::PluginRegistryScope;
+use super::id::PluginId;
 
 #[async_trait]
 pub trait Plugin: Send + Sync {

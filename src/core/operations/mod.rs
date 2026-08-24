@@ -14,8 +14,9 @@ pub use create_session::{create_session, new_session};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::error::{Error, Result};
-use super::events::RuntimeEvent;
-use super::models::{SessionCommit, SessionGroupId, SessionId, SessionMutation, SessionState};
+use super::models::{
+    RuntimeEvent, SessionCommit, SessionGroupId, SessionId, SessionMutation, SessionState,
+};
 
 enum SessionRequest {
     Commit {

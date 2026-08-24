@@ -5,9 +5,8 @@ use serde_json::Value;
 use super::{
     config::{aggregate, Config},
     error::Result,
-    models::{ProjectId, SessionGroupId, SessionId, SessionState},
+    models::{Plugin, ProjectId, SessionGroupId, SessionId, SessionState},
     operations::{new_session, SessionHandle},
-    plugin::Plugin,
     registry::Registry,
 };
 

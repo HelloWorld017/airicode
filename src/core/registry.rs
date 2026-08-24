@@ -4,12 +4,12 @@ use std::{
 };
 
 use super::{
-    command::Command,
     error::{Error, Result},
     hooks::RegisterHook,
-    models::{CommandId, PluginId, ProviderId, RegistrationId, ToolId, WorkdirLayerId},
-    provider::Provider,
-    tool::Tool,
+    models::{
+        Command, CommandId, PluginId, Provider, ProviderId, RegistrationId, Tool, ToolId,
+        WorkdirLayerId,
+    },
     workdir::WorkdirLayer,
 };
 

@@ -1,8 +1,10 @@
 pub mod command;
 pub mod context;
+pub mod events;
 pub mod id;
 pub mod message;
 pub mod note;
+pub mod plugin;
 pub mod project;
 pub mod provider;
 pub mod session;
@@ -13,9 +15,11 @@ pub mod workdir;
 
 pub use command::*;
 pub use context::*;
+pub use events::*;
 pub use id::*;
 pub use message::*;
 pub use note::*;
+pub use plugin::*;
 pub use project::*;
 pub use provider::*;
 pub use session::*;

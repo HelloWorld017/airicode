@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -75,4 +76,11 @@ pub struct ProviderRequest {
     pub messages: Vec<Arc<Message>>,
     pub tools: Vec<ToolDefinition>,
     pub cancellation: CancellationToken,
+}
+
+#[async_trait]
+pub trait Provider: Send + Sync {
+    fn id(&self) -> ProviderId;
+    async fn get_models(&self) -> Result<Vec<Model>>;
+    async fn request(&self, request: ProviderRequest) -> Result<ProviderStream>;
 }

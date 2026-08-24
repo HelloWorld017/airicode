@@ -6,15 +6,14 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     error::{Error, Result},
-    events::RuntimeEvent,
     hooks::{
         BeforeMessageContext, BeforeProviderRequestContext, BeforeToolExecutionContext,
         ContextContributionContext,
     },
     models::{
         ContextPriority, ContextSource, FinishReason, Message, MessagePart, ProjectId,
-        ProviderEvent, ProviderRequest, Role, SessionGroupId, SessionId, ToolCallId, ToolOutput,
-        TurnId,
+        ProviderEvent, ProviderRequest, Role, RuntimeEvent, SessionGroupId, SessionId, ToolCallId,
+        ToolOutput, TurnId,
     },
     operations::Operations,
     registry::Registry,

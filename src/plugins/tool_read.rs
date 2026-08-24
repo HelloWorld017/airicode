@@ -6,10 +6,8 @@ use serde_json::Value;
 use crate::{
     core::{
         error::{Error, Result},
-        models::{PluginId, ToolContext, ToolDefinition, ToolId, ToolOutput},
-        plugin::Plugin,
+        models::{Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId, ToolOutput},
         registry::PluginRegistryScope,
-        tool::Tool,
     },
     utils::hashline,
 };

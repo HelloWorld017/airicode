@@ -1,5 +1,5 @@
 use std::{
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
@@ -14,8 +14,29 @@ use tokio_util::sync::CancellationToken;
 pub use super::models::workdir::{Workdir, WorkdirLayer};
 use super::{
     error::{Error, Result},
-    models::{validate_relative_path, CommandResult, CommandSpec},
+    models::{CommandResult, CommandSpec},
 };
+
+pub fn validate_relative_path(path: &Path) -> Result<()> {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Err(Error::Workdir(format!(
+            "path must be root-relative: {}",
+            path.display()
+        )));
+    }
+    for component in path.components() {
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(Error::Workdir(format!(
+                    "path escapes workdir: {}",
+                    path.display()
+                )))
+            }
+        }
+    }
+    Ok(())
+}
 
 #[derive(Clone)]
 pub struct NativeWorkdir {

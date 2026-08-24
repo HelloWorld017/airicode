@@ -5,10 +5,10 @@ use serde_json::Value;
 
 use crate::core::{
     error::{Error, Result},
-    models::{CommandSpec, PluginId, ToolContext, ToolDefinition, ToolId, ToolOutput},
-    plugin::Plugin,
+    models::{
+        CommandSpec, Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId, ToolOutput,
+    },
     registry::PluginRegistryScope,
-    tool::Tool,
 };
 
 pub struct ToolShell {

@@ -2,8 +2,9 @@ use tokio::sync::oneshot;
 
 use super::{Operations, SessionRequest};
 use crate::core::error::{Error, Result};
-use crate::core::events::RuntimeEvent;
-use crate::core::models::{DurableUIState, SessionCommit, SessionMutation, SessionState};
+use crate::core::models::{
+    DurableUIState, RuntimeEvent, SessionCommit, SessionMutation, SessionState,
+};
 
 impl Operations {
     pub async fn snapshot(&self) -> Result<SessionState> {

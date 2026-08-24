@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::models::{FinishReason, Message, ToolCallId, ToolOutput, TurnId, Usage};
+use super::{FinishReason, Message, ToolCallId, ToolOutput, TurnId, Usage};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RuntimeEvent {

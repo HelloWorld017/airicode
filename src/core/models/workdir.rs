@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use super::super::error::{Error, Result};
+use super::super::error::Result;
 use super::id::{ProjectId, SessionGroupId};
 
 #[derive(Clone, Debug)]
@@ -74,25 +74,4 @@ pub struct CommandResult {
     pub stdout: String,
     pub stderr: String,
     pub truncated: bool,
-}
-
-pub fn validate_relative_path(path: &Path) -> Result<()> {
-    if path.as_os_str().is_empty() || path.is_absolute() {
-        return Err(Error::Workdir(format!(
-            "path must be root-relative: {}",
-            path.display()
-        )));
-    }
-    for component in path.components() {
-        match component {
-            Component::Normal(_) | Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(Error::Workdir(format!(
-                    "path escapes workdir: {}",
-                    path.display()
-                )))
-            }
-        }
-    }
-    Ok(())
 }

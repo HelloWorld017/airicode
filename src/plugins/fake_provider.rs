@@ -10,11 +10,9 @@ use serde_json::Value;
 use crate::core::{
     error::{Error, Result},
     models::{
-        Model, ModelCapabilities, PluginId, ProviderEvent, ProviderId, ProviderRequest,
-        ProviderStream,
+        Model, ModelCapabilities, Plugin, PluginId, Provider, ProviderEvent, ProviderId,
+        ProviderRequest, ProviderStream,
     },
-    plugin::Plugin,
-    provider::Provider,
     registry::PluginRegistryScope,
 };
 

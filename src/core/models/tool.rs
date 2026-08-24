@@ -1,11 +1,14 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+use super::super::error::Result;
 use super::super::operations::Operations;
+use super::id::{ProjectId, SessionGroupId, SessionId, ToolId, TurnId};
 use super::workdir::Workdir;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -23,8 +26,6 @@ impl ToolOutput {
         }
     }
 }
-use super::id::{ProjectId, SessionGroupId, SessionId, TurnId};
-
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ToolDefinition {
     pub name: String,
@@ -41,4 +42,11 @@ pub struct ToolContext {
     pub operations: Operations,
     pub workdir: Arc<dyn Workdir>,
     pub cancellation: CancellationToken,
+}
+
+#[async_trait]
+pub trait Tool: Send + Sync {
+    fn id(&self) -> ToolId;
+    fn definition(&self) -> ToolDefinition;
+    async fn execute(&self, input: Value, context: ToolContext) -> Result<ToolOutput>;
 }
