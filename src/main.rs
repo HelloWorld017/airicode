@@ -38,6 +38,11 @@ async fn main() -> airicode::Result<()> {
     }
     let core = builder.build().await?;
     let provider_id = openai.provider_id();
+    if core.registry().provider(provider_id).is_none() {
+        return Err(airicode::Error::Config(
+            "OpenAI provider is not configured; set OPENAI_API_KEY before starting airicode".into(),
+        ));
+    }
     let (session, group_id) = match persistence.discover().await?.into_iter().next() {
         Some(session_id) => {
             let group_id = session_id.group_id();

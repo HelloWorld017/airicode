@@ -3,8 +3,8 @@ use std::{path::Path, sync::Arc, time::Duration};
 use airicode::{
     core::{
         models::{
-            MessagePart, ProjectId, ProviderEvent, ProviderId, Role, SessionGroupId, ToolContext,
-            ToolOutput, TurnId,
+            MessagePart, ProjectId, ProviderEvent, ProviderId, Role, RuntimeEvent, SessionGroupId,
+            ToolContext, ToolOutput, TurnId,
         },
         operations::new_session,
         runtime::{TurnEngine, TurnRequest},
@@ -191,6 +191,53 @@ async fn fake_provider_completes_a_read_tool_turn_on_a_real_project() -> Result<
     assert!(state.visible_messages().iter().any(|message| {
         message.content.iter().any(|part| matches!(part.content.as_ref(), Some(airicode::core::models::MessagePartContent::Text { text }) if text.contains("The file says")))
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_turn_emits_error_after_persisting_user_message() -> Result<()> {
+    let directory = tempdir()?;
+    let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
+    let provider_id = ProviderId::new();
+    let provider = Arc::new(FakeProvider::new(provider_id, std::iter::empty()));
+    let fake_plugin = Arc::new(FakeProviderPlugin::new(provider));
+    let core = airicode::core::CoreBuilder::new()
+        .plugin(fake_plugin)
+        .build()
+        .await?;
+    let group_id = SessionGroupId::new();
+    let session = core.create_session(group_id);
+    let mut events = session.subscribe();
+    let engine = TurnEngine::new(core.registry(), session.operations.clone(), workdir);
+    let request = TurnRequest::new(
+        ProjectId::from_workdir(directory.path()),
+        group_id,
+        session.operations.session_id(),
+        provider_id,
+        "fake-model",
+        "build",
+        "hello",
+    );
+
+    let error = engine.run(request).await.expect_err("turn should fail");
+    assert!(error.to_string().contains("no scripted response"));
+
+    let mut failed = None;
+    while let Ok(event) = events.try_recv() {
+        if let RuntimeEvent::TurnFailed { error, .. } = event {
+            failed = Some(error);
+        }
+    }
+    assert_eq!(
+        failed.as_deref(),
+        Some("provider error: fake provider has no scripted response")
+    );
+
+    let state = session.operations.snapshot().await?;
+    assert!(state
+        .visible_messages()
+        .iter()
+        .any(|message| message.role == Role::User));
     Ok(())
 }
 

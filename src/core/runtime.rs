@@ -73,6 +73,22 @@ impl TurnEngine {
 
     pub async fn run(&self, request: TurnRequest) -> Result<TurnId> {
         let turn_id = TurnId::new();
+        let result = self.run_turn(request, turn_id).await;
+        if let Err(error) = &result {
+            if !matches!(error, Error::Cancelled) {
+                let _ = self
+                    .operations
+                    .emit(RuntimeEvent::TurnFailed {
+                        turn_id,
+                        error: error.to_string(),
+                    })
+                    .await;
+            }
+        }
+        result
+    }
+
+    async fn run_turn(&self, request: TurnRequest, turn_id: TurnId) -> Result<TurnId> {
         let user = Message::text(
             Role::User,
             request.input.clone(),

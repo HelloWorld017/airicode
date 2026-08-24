@@ -40,6 +40,10 @@ pub enum RuntimeEvent {
     TurnCancelled {
         turn_id: TurnId,
     },
+    TurnFailed {
+        turn_id: TurnId,
+        error: String,
+    },
     SessionSnapshotChanged,
     RegistryChanged {
         revision: u64,

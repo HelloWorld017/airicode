@@ -192,6 +192,11 @@ impl TerminalApp {
             RuntimeEvent::TurnCancelled { .. } => {
                 self.status = "cancelled".into();
             }
+            RuntimeEvent::TurnFailed { error, .. } => {
+                self.streaming.clear();
+                self.reasoning.clear();
+                self.status = format!("error: {error}");
+            }
             RuntimeEvent::ToolExecutionStarted { name, .. } => {
                 self.status = format!("running {name}");
             }
