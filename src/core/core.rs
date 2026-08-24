@@ -5,7 +5,8 @@ use serde_json::Value;
 use super::{
     config::{aggregate, Config},
     error::Result,
-    models::{Plugin, ProjectId, SessionGroupId, SessionId, SessionState},
+    hooks::{ConfigReadContext, OpenProjectContext},
+    models::{Plugin, Project, ProjectId, SessionGroupId, SessionId, SessionState},
     operations::{new_session, new_session_with_store, SessionHandle},
     registry::Registry,
     shell::ShellActionHandler,
@@ -13,6 +14,7 @@ use super::{
 
 pub struct CoreBuilder {
     plugins: Vec<Arc<dyn Plugin>>,
+    project: Option<Project>,
     raw_config: Value,
 }
 
@@ -20,6 +22,7 @@ impl Default for CoreBuilder {
     fn default() -> Self {
         Self {
             plugins: Vec::new(),
+            project: None,
             raw_config: Value::Object(Default::default()),
         }
     }
@@ -37,6 +40,10 @@ impl CoreBuilder {
         self.raw_config = config;
         self
     }
+    pub fn project(mut self, project: Project) -> Self {
+        self.project = Some(project);
+        self
+    }
     pub async fn build(self) -> Result<Core> {
         let registry = Registry::new();
         let mut schemas = Vec::new();
@@ -46,16 +53,27 @@ impl CoreBuilder {
             plugin.clone().init(scope).await?;
         }
         let config = aggregate(self.raw_config, &schemas)?;
-        for plugin in &self.plugins {
-            let namespace = config
-                .namespace(plugin.name())
-                .cloned()
-                .unwrap_or_else(|| Value::Object(Default::default()));
-            plugin
-                .configure(&namespace, registry.scope(plugin.id()))
-                .await?;
+        for (hook, registry_scope) in registry.config_read_hooks() {
+            hook.config_read(ConfigReadContext {
+                config: config.clone(),
+                registry: registry_scope,
+            })
+            .await?;
         }
-        Ok(Core { registry, config })
+        if let Some(project) = self.project.clone() {
+            for (hook, registry_scope) in registry.open_project_hooks() {
+                hook.open_project(OpenProjectContext {
+                    project: project.clone(),
+                    registry: registry_scope,
+                })
+                .await?;
+            }
+        }
+        Ok(Core {
+            registry,
+            config,
+            project: self.project,
+        })
     }
 }
 
@@ -63,6 +81,7 @@ impl CoreBuilder {
 pub struct Core {
     pub registry: Registry,
     pub config: Config,
+    pub project: Option<Project>,
 }
 
 impl Default for Core {
@@ -76,6 +95,7 @@ impl Core {
         Self {
             registry: Registry::new(),
             config: Config::default(),
+            project: None,
         }
     }
     pub fn registry(&self) -> Registry {

@@ -11,14 +11,16 @@ use airicode::{
         workdir::{NativeWorkdir, Workdir},
         Tool,
     },
-    plugins::{
-        FakeProvider, FakeProviderPlugin, ToolRead, ToolReadPlugin, ToolShell, ToolShellPlugin,
-    },
+    plugins::{ToolRead, ToolReadPlugin, ToolShell, ToolShellPlugin},
     Result,
 };
 use serde_json::json;
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
+
+mod utils;
+
+use utils::{FakeProvider, FakeProviderPlugin};
 
 #[tokio::test]
 async fn native_workdir_enforces_root_and_executes_commands() -> Result<()> {

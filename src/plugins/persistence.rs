@@ -1,13 +1,14 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
 use crate::core::{
     error::{Error, Result},
+    hooks::{OpenProjectContext, OpenProjectHook},
     models::{Plugin, PluginId, ProjectId, SessionCommit, SessionId},
-    registry::PluginRegistryScope,
+    registry::{PluginRegistryScope, RegistrationHandle},
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -248,23 +249,31 @@ pub type JsonlStore = JsonlSessionStore;
 
 pub struct PersistencePlugin {
     id: PluginId,
-    store: Arc<dyn SessionStore>,
+    store: RwLock<Option<Arc<JsonlSessionStore>>>,
+    registration: Mutex<Option<RegistrationHandle>>,
 }
 
 impl PersistencePlugin {
-    pub fn new(store: Arc<dyn SessionStore>) -> Self {
+    pub fn new() -> Self {
         Self {
             id: PluginId::new(),
-            store,
+            store: RwLock::new(None),
+            registration: Mutex::new(None),
         }
     }
 
-    pub fn for_project(project_root: impl AsRef<Path>) -> Result<Self> {
-        Ok(Self::new(Arc::new(JsonlSessionStore::new(project_root)?)))
+    pub fn store(&self) -> Option<Arc<JsonlSessionStore>> {
+        self.store
+            .read()
+            .expect("persistence store lock poisoned")
+            .clone()
     }
 
-    pub fn store(&self) -> Arc<dyn SessionStore> {
-        self.store.clone()
+    pub async fn discover(&self) -> Result<Vec<SessionId>> {
+        let store = self
+            .store()
+            .ok_or_else(|| Error::Persistence("no project is open".into()))?;
+        store.discover().await
     }
 }
 
@@ -283,8 +292,25 @@ impl Plugin for PersistencePlugin {
     }
 
     async fn init(self: Arc<Self>, registry: PluginRegistryScope) -> Result<()> {
-        registry
-            .register_session_store(self.store.clone(), 0)
-            .map(|_| ())
+        let hook: Arc<dyn OpenProjectHook> = self;
+        registry.register_hook(hook)
+    }
+}
+
+#[async_trait]
+impl OpenProjectHook for PersistencePlugin {
+    async fn open_project(&self, context: OpenProjectContext) -> Result<()> {
+        let store = Arc::new(JsonlSessionStore::new(&context.project.root)?);
+        let previous = self.registration.lock().await.take();
+        if let Some(previous) = previous {
+            previous.remove().await?;
+        }
+        let registration = context.registry.register_session_store(store.clone(), 0)?;
+        *self
+            .store
+            .write()
+            .map_err(|_| Error::Plugin("persistence store lock poisoned".into()))? = Some(store);
+        *self.registration.lock().await = Some(registration);
+        Ok(())
     }
 }

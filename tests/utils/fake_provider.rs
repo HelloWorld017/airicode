@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use futures_util::stream;
 use serde_json::Value;
 
-use crate::core::{
+use airicode::core::{
     error::{Error, Result},
     models::{
         Model, ModelCapabilities, Plugin, PluginId, Provider, ProviderEvent, ProviderId,
@@ -30,19 +30,20 @@ impl FakeProvider {
             model: "fake-model".into(),
         }
     }
+
+    #[allow(dead_code)]
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
         self
     }
+
+    #[allow(dead_code)]
     pub fn push_response(&self, response: Vec<ProviderEvent>) -> Result<()> {
         self.responses
             .lock()
             .map_err(|_| Error::Provider("fake provider poisoned".into()))?
             .push_back(response);
         Ok(())
-    }
-    pub fn id(&self) -> ProviderId {
-        self.id
     }
 }
 
@@ -51,6 +52,7 @@ impl Provider for FakeProvider {
     fn id(&self) -> ProviderId {
         self.id
     }
+
     async fn get_models(&self) -> Result<Vec<Model>> {
         Ok(vec![Model {
             id: self.model.clone(),
@@ -62,6 +64,7 @@ impl Provider for FakeProvider {
             },
         }])
     }
+
     async fn request(&self, _request: ProviderRequest) -> Result<ProviderStream> {
         let response = self
             .responses
@@ -85,9 +88,6 @@ impl FakeProviderPlugin {
             provider,
         }
     }
-    pub fn provider(&self) -> Arc<FakeProvider> {
-        self.provider.clone()
-    }
 }
 
 #[async_trait]
@@ -95,12 +95,15 @@ impl Plugin for FakeProviderPlugin {
     fn id(&self) -> PluginId {
         self.id
     }
+
     fn name(&self) -> &str {
         "fake_provider"
     }
+
     fn config_schema(&self) -> Value {
         serde_json::json!({ "type": "object" })
     }
+
     async fn init(self: Arc<Self>, registry: PluginRegistryScope) -> Result<()> {
         registry
             .register_provider(self.provider.clone(), 0)

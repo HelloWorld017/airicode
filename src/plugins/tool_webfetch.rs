@@ -105,10 +105,10 @@ pub struct ToolWebfetchPlugin {
     tool: Arc<ToolWebfetch>,
 }
 impl ToolWebfetchPlugin {
-    pub fn new(tool: Arc<ToolWebfetch>) -> Self {
+    pub fn new() -> Self {
         Self {
             id: PluginId::new(),
-            tool,
+            tool: Arc::new(ToolWebfetch::new()),
         }
     }
 }

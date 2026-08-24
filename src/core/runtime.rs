@@ -80,7 +80,7 @@ impl TurnEngine {
             Some(turn_id),
         );
         let user_for_hook = Arc::new(user.clone());
-        for hook in self.registry.hooks().before_message.clone() {
+        for (_, hook) in self.registry.hooks().before_message.clone() {
             hook.before_message(BeforeMessageContext {
                 turn_id,
                 message: user_for_hook.clone(),
@@ -140,7 +140,7 @@ impl TurnEngine {
                 .into_iter()
                 .map(|tool| tool.definition())
                 .collect();
-            for hook in self.registry.hooks().before_provider_request.clone() {
+            for (_, hook) in self.registry.hooks().before_provider_request.clone() {
                 hook.before_provider_request(BeforeProviderRequestContext {
                     turn_id,
                     model: request.model.clone(),
@@ -352,7 +352,7 @@ impl TurnEngine {
                 },
             ));
         };
-        for hook in self.registry.hooks().before_tool.clone() {
+        for (_, hook) in self.registry.hooks().before_tool.clone() {
             hook.before_tool_execution(BeforeToolExecutionContext {
                 turn_id,
                 call_id: call.id.clone(),
@@ -376,7 +376,7 @@ impl TurnEngine {
             Err(Error::Tool(message)) => ToolOutput::Failure { content: message },
             Err(error) => return Err(error),
         };
-        for hook in self.registry.hooks().after_tool.clone() {
+        for (_, hook) in self.registry.hooks().after_tool.clone() {
             hook.after_tool_execution(super::hooks::AfterToolExecutionContext {
                 turn_id,
                 call_id: call.id.clone(),

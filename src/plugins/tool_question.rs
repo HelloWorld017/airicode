@@ -79,10 +79,10 @@ pub struct ToolQuestionPlugin {
     tool: Arc<ToolQuestion>,
 }
 impl ToolQuestionPlugin {
-    pub fn new(tool: Arc<ToolQuestion>) -> Self {
+    pub fn new() -> Self {
         Self {
             id: PluginId::new(),
-            tool,
+            tool: Arc::new(ToolQuestion::new()),
         }
     }
 }

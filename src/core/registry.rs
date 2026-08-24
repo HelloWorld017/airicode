@@ -5,7 +5,7 @@ use std::{
 
 use super::{
     error::{Error, Result},
-    hooks::RegisterHook,
+    hooks::{ConfigReadHook, OpenProjectHook, RegisterHook},
     models::{
         Command, CommandId, PluginId, Provider, ProviderId, RegistrationId, ShellAction,
         ShellActionId, Tool, ToolId, WorkdirLayerId,
@@ -281,15 +281,41 @@ impl Registry {
             .fold(base, |inner, layer| layer.layer(context, inner))
     }
 
-    pub(crate) fn hooks(&self) -> Arc<super::hooks::HookRegistry> {
+    pub fn hooks(&self) -> Arc<super::hooks::HookRegistry> {
         let hooks = self.inner.hooks.read().expect("hooks poisoned");
         Arc::new(super::hooks::HookRegistry {
+            config_read: hooks.config_read.clone(),
+            open_project: hooks.open_project.clone(),
             context: hooks.context.clone(),
             before_message: hooks.before_message.clone(),
             before_provider_request: hooks.before_provider_request.clone(),
             before_tool: hooks.before_tool.clone(),
             after_tool: hooks.after_tool.clone(),
         })
+    }
+
+    pub fn config_read_hooks(&self) -> Vec<(Arc<dyn ConfigReadHook>, PluginRegistryScope)> {
+        self.inner
+            .hooks
+            .read()
+            .expect("hooks poisoned")
+            .config_read
+            .iter()
+            .map(|(owner, hook)| (hook.clone(), self.scope(*owner)))
+            .collect()
+    }
+
+    pub fn open_project_hooks(
+        &self,
+    ) -> Vec<(Arc<dyn OpenProjectHook>, PluginRegistryScope)> {
+        self.inner
+            .hooks
+            .read()
+            .expect("hooks poisoned")
+            .open_project
+            .iter()
+            .map(|(owner, hook)| (hook.clone(), self.scope(*owner)))
+            .collect()
     }
 
     fn remove(&self, kind: RegistrationKind, registration_id: RegistrationId) -> Result<()> {
@@ -384,7 +410,7 @@ impl PluginRegistryScope {
             .hooks
             .write()
             .map_err(|_| Error::Registry("hooks poisoned".into()))?
-            .register(hook);
+            .register(hook, self.owner);
         Ok(())
     }
 

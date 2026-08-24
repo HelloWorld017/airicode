@@ -1,4 +1,3 @@
-pub mod fake_provider;
 pub mod instruction_base;
 pub mod persistence;
 pub mod provider_openai;
@@ -13,7 +12,6 @@ pub mod tool_shell;
 pub mod tool_todo;
 pub mod tool_webfetch;
 
-pub use fake_provider::{FakeProvider, FakeProviderPlugin};
 pub use instruction_base::{InstructionBasePlugin, DEFAULT_BASE_INSTRUCTION};
 pub use persistence::{
     default_data_root, JsonlSessionStore, JsonlStore, PersistencePlugin, SessionLogRecord,

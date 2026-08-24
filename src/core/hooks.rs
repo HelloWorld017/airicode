@@ -3,9 +3,26 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::{
+    config::Config,
     error::Result,
-    models::{ContextContribution, ContextPriority, Message, ToolCallId, ToolOutput, TurnId},
+    models::{
+        ContextContribution, ContextPriority, Message, PluginId, Project, ToolCallId, ToolOutput,
+        TurnId,
+    },
+    registry::PluginRegistryScope,
 };
+
+#[derive(Clone)]
+pub struct ConfigReadContext {
+    pub config: Config,
+    pub registry: PluginRegistryScope,
+}
+
+#[derive(Clone)]
+pub struct OpenProjectContext {
+    pub project: Project,
+    pub registry: PluginRegistryScope,
+}
 
 #[derive(Clone)]
 pub struct ContextContributionContext {
@@ -41,6 +58,16 @@ pub struct AfterToolExecutionContext {
 }
 
 #[async_trait]
+pub trait ConfigReadHook: Send + Sync {
+    async fn config_read(&self, context: ConfigReadContext) -> Result<()>;
+}
+
+#[async_trait]
+pub trait OpenProjectHook: Send + Sync {
+    async fn open_project(&self, context: OpenProjectContext) -> Result<()>;
+}
+
+#[async_trait]
 pub trait ContextContributionHook: Send + Sync {
     async fn contribute(
         &self,
@@ -70,50 +97,64 @@ pub trait AfterToolExecutionHook: Send + Sync {
 
 #[derive(Default)]
 pub struct HookRegistry {
-    pub context: Vec<Arc<dyn ContextContributionHook>>,
-    pub before_message: Vec<Arc<dyn BeforeMessageHook>>,
-    pub before_provider_request: Vec<Arc<dyn BeforeProviderRequestHook>>,
-    pub before_tool: Vec<Arc<dyn BeforeToolExecutionHook>>,
-    pub after_tool: Vec<Arc<dyn AfterToolExecutionHook>>,
+    pub config_read: Vec<(PluginId, Arc<dyn ConfigReadHook>)>,
+    pub open_project: Vec<(PluginId, Arc<dyn OpenProjectHook>)>,
+    pub context: Vec<(PluginId, Arc<dyn ContextContributionHook>)>,
+    pub before_message: Vec<(PluginId, Arc<dyn BeforeMessageHook>)>,
+    pub before_provider_request: Vec<(PluginId, Arc<dyn BeforeProviderRequestHook>)>,
+    pub before_tool: Vec<(PluginId, Arc<dyn BeforeToolExecutionHook>)>,
+    pub after_tool: Vec<(PluginId, Arc<dyn AfterToolExecutionHook>)>,
 }
 
 pub trait RegisterHook {
-    fn register_into(self, registry: &mut HookRegistry);
+    fn register_into(self, registry: &mut HookRegistry, owner: PluginId);
 }
 
 impl RegisterHook for Arc<dyn ContextContributionHook> {
-    fn register_into(self, registry: &mut HookRegistry) {
-        registry.context.push(self);
+    fn register_into(self, registry: &mut HookRegistry, owner: PluginId) {
+        registry.context.push((owner, self));
     }
 }
 
 impl RegisterHook for Arc<dyn BeforeMessageHook> {
-    fn register_into(self, registry: &mut HookRegistry) {
-        registry.before_message.push(self);
+    fn register_into(self, registry: &mut HookRegistry, owner: PluginId) {
+        registry.before_message.push((owner, self));
     }
 }
 
 impl RegisterHook for Arc<dyn BeforeProviderRequestHook> {
-    fn register_into(self, registry: &mut HookRegistry) {
-        registry.before_provider_request.push(self);
+    fn register_into(self, registry: &mut HookRegistry, owner: PluginId) {
+        registry.before_provider_request.push((owner, self));
     }
 }
 
 impl RegisterHook for Arc<dyn BeforeToolExecutionHook> {
-    fn register_into(self, registry: &mut HookRegistry) {
-        registry.before_tool.push(self);
+    fn register_into(self, registry: &mut HookRegistry, owner: PluginId) {
+        registry.before_tool.push((owner, self));
     }
 }
 
 impl RegisterHook for Arc<dyn AfterToolExecutionHook> {
-    fn register_into(self, registry: &mut HookRegistry) {
-        registry.after_tool.push(self);
+    fn register_into(self, registry: &mut HookRegistry, owner: PluginId) {
+        registry.after_tool.push((owner, self));
+    }
+}
+
+impl RegisterHook for Arc<dyn ConfigReadHook> {
+    fn register_into(self, registry: &mut HookRegistry, owner: PluginId) {
+        registry.config_read.push((owner, self));
+    }
+}
+
+impl RegisterHook for Arc<dyn OpenProjectHook> {
+    fn register_into(self, registry: &mut HookRegistry, owner: PluginId) {
+        registry.open_project.push((owner, self));
     }
 }
 
 impl HookRegistry {
-    pub(crate) fn register<H: RegisterHook>(&mut self, hook: H) {
-        hook.register_into(self);
+    pub fn register<H: RegisterHook>(&mut self, hook: H, owner: PluginId) {
+        hook.register_into(self, owner);
     }
 
     pub async fn contributions(
@@ -121,7 +162,7 @@ impl HookRegistry {
         context: ContextContributionContext,
     ) -> Result<Vec<ContextContribution>> {
         let mut result = Vec::new();
-        for hook in self.context.clone() {
+        for (_, hook) in self.context.clone() {
             result.extend(hook.contribute(context.clone()).await?);
         }
         result.sort_by_key(|item| match item.priority {

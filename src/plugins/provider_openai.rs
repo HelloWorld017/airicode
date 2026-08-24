@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 
 use crate::core::{
     error::{Error, Result},
+    hooks::{ConfigReadContext, ConfigReadHook},
     models::{
         FinishReason, Message, MessagePart, Model, ModelCapabilities, Plugin, PluginId, Provider,
         ProviderEvent, ProviderId, ProviderRequest, ProviderStream, Role, Usage,
@@ -318,19 +319,28 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
 
 pub struct OpenAiProviderPlugin {
     id: PluginId,
-    provider: Arc<OpenAiProvider>,
+    provider_id: ProviderId,
+    provider: RwLock<Option<Arc<OpenAiProvider>>>,
 }
 
 impl OpenAiProviderPlugin {
-    pub fn new(provider: Arc<OpenAiProvider>) -> Self {
+    pub fn new() -> Self {
         Self {
             id: PluginId::new(),
-            provider,
+            provider_id: ProviderId::new(),
+            provider: RwLock::new(None),
         }
     }
 
-    pub fn provider(&self) -> Arc<OpenAiProvider> {
-        self.provider.clone()
+    pub fn provider_id(&self) -> ProviderId {
+        self.provider_id
+    }
+
+    pub fn provider(&self) -> Option<Arc<OpenAiProvider>> {
+        self.provider
+            .read()
+            .expect("OpenAI provider lock poisoned")
+            .clone()
     }
 }
 
@@ -360,22 +370,37 @@ impl Plugin for OpenAiProviderPlugin {
     }
 
     async fn init(self: Arc<Self>, registry: PluginRegistryScope) -> Result<()> {
-        registry
-            .register_provider(self.provider.clone(), 0)
-            .map(|_| ())
+        let hook: Arc<dyn ConfigReadHook> = self;
+        registry.register_hook(hook)
     }
+}
 
-    async fn configure(&self, config: &Value, _registry: PluginRegistryScope) -> Result<()> {
-        if let Some(base_url) = config.get("base_url").and_then(Value::as_str) {
-            self.provider.set_base_url(base_url.to_string());
-        }
+#[async_trait]
+impl ConfigReadHook for OpenAiProviderPlugin {
+    async fn config_read(&self, context: ConfigReadContext) -> Result<()> {
+        let config = context
+            .config
+            .namespace(self.name())
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Default::default()));
         let key_env = config
             .get("api_key_env")
             .and_then(Value::as_str)
             .unwrap_or("OPENAI_API_KEY");
-        if let Ok(key) = std::env::var(key_env) {
-            self.provider.set_api_key(key);
+        let key =
+            std::env::var(key_env).map_err(|_| Error::Config(format!("{key_env} is not set")))?;
+        let provider = Arc::new(OpenAiProvider::new(self.provider_id, key));
+        if let Some(base_url) = config.get("base_url").and_then(Value::as_str) {
+            provider.set_base_url(base_url.to_string());
         }
+        context
+            .registry
+            .register_provider(provider.clone(), 0)
+            .map(|_| ())?;
+        *self
+            .provider
+            .write()
+            .map_err(|_| Error::Plugin("OpenAI provider lock poisoned".into()))? = Some(provider);
         Ok(())
     }
 }

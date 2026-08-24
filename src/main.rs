@@ -1,11 +1,11 @@
 use std::{path::PathBuf, sync::Arc};
 
 use airicode::{
-    core::{project_from_path, CoreBuilder, ProviderId, SessionGroupId},
+    core::{project_from_path, CoreBuilder, SessionGroupId},
     plugins::{
-        InstructionBasePlugin, JsonlSessionStore, OpenAiProvider, OpenAiProviderPlugin,
-        PersistencePlugin, ToolGrepPlugin, ToolPatchPlugin, ToolQuestion, ToolQuestionPlugin,
-        ToolReadPlugin, ToolShellPlugin, ToolTodoPlugin, ToolWebfetch, ToolWebfetchPlugin,
+        InstructionBasePlugin, OpenAiProviderPlugin, PersistencePlugin, ToolGrepPlugin,
+        ToolPatchPlugin, ToolQuestionPlugin, ToolReadPlugin, ToolShellPlugin, ToolTodoPlugin,
+        ToolWebfetchPlugin,
     },
     ui::terminal::TerminalApp,
 };
@@ -20,29 +20,25 @@ async fn main() -> airicode::Result<()> {
 
     let project = project_from_path(root.clone());
     let workdir = Arc::new(airicode::core::workdir::NativeWorkdir::new(root.clone())?);
-    let store = Arc::new(JsonlSessionStore::new(root)?);
-    let provider_id = ProviderId::new();
+    let persistence = Arc::new(PersistencePlugin::new());
+    let openai = Arc::new(OpenAiProviderPlugin::new());
     let mut builder = CoreBuilder::new()
-        .plugin(Arc::new(PersistencePlugin::new(store.clone())))
+        .project(project.clone())
+        .plugin(persistence.clone())
         .plugin(Arc::new(InstructionBasePlugin::new()))
         .plugin(Arc::new(ToolReadPlugin::new()))
         .plugin(Arc::new(ToolShellPlugin::new()))
         .plugin(Arc::new(ToolPatchPlugin::new()))
         .plugin(Arc::new(ToolGrepPlugin::new()))
         .plugin(Arc::new(ToolTodoPlugin::new()))
-        .plugin(Arc::new(ToolQuestionPlugin::new(Arc::new(
-            ToolQuestion::new(),
-        ))))
-        .plugin(Arc::new(ToolWebfetchPlugin::new(Arc::new(
-            ToolWebfetch::new(),
-        ))));
+        .plugin(Arc::new(ToolQuestionPlugin::new()))
+        .plugin(Arc::new(ToolWebfetchPlugin::new()));
     if std::env::var_os("OPENAI_API_KEY").is_some() {
-        builder = builder.plugin(Arc::new(OpenAiProviderPlugin::new(Arc::new(
-            OpenAiProvider::from_env(provider_id)?,
-        ))));
+        builder = builder.plugin(openai.clone());
     }
     let core = builder.build().await?;
-    let (session, group_id) = match store.discover().await?.into_iter().next() {
+    let provider_id = openai.provider_id();
+    let (session, group_id) = match persistence.discover().await?.into_iter().next() {
         Some(session_id) => {
             let group_id = session_id.group_id();
             (core.load_session(session_id, group_id).await?, group_id)

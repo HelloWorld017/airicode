@@ -15,7 +15,4 @@ pub trait Plugin: Send + Sync {
         Value::Object(Default::default())
     }
     async fn init(self: Arc<Self>, registry: PluginRegistryScope) -> Result<()>;
-    async fn configure(&self, _config: &Value, _registry: PluginRegistryScope) -> Result<()> {
-        Ok(())
-    }
 }

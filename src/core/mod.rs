@@ -16,7 +16,8 @@ pub use core::{project_from_path, Core, CoreBuilder};
 pub use error::{Error, Result};
 pub use hooks::{
     AfterToolExecutionHook, BeforeMessageHook, BeforeProviderRequestHook, BeforeToolExecutionHook,
-    ContextContributionHook, HookRegistry, RegisterHook,
+    ConfigReadContext, ConfigReadHook, ContextContributionHook, HookRegistry, OpenProjectContext,
+    OpenProjectHook, RegisterHook,
 };
 pub use models::*;
 pub use operations::{Operations, SessionHandle};
