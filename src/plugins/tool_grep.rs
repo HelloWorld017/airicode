@@ -1,6 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
+use schemars::JsonSchema;
 use serde_json::Value;
 
 use crate::core::{
@@ -10,6 +11,15 @@ use crate::core::{
     },
     registry::PluginRegistryScope,
 };
+
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+struct GrepInputSchema {
+    pattern: String,
+    path: Option<String>,
+    glob: Option<String>,
+    max_results: Option<usize>,
+}
 
 pub struct ToolGrep {
     id: ToolId,
@@ -47,17 +57,8 @@ impl Tool for ToolGrep {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "grep".into(),
-            description: "Search files visible through the current workdir.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "required": ["pattern"],
-                "properties": {
-                    "pattern": { "type": "string" },
-                    "path": { "type": "string" },
-                    "glob": { "type": "string" },
-                    "max_results": { "type": "integer", "minimum": 1 }
-                }
-            }),
+            description: "Search files visible through the current root-relative workdir using a regular-expression pattern. `path` optionally limits the search scope and `glob` optionally filters filenames. Results include file and line references and are size-limited. No matches are an expected tool failure, not an infrastructure error; this tool does not modify files.".into(),
+            input_schema: crate::utils::schema::json_schema::<GrepInputSchema>(),
         }
     }
 

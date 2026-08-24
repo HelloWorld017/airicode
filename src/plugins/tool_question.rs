@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use schemars::JsonSchema;
 use serde_json::{json, Value};
 
 use crate::core::{
@@ -8,6 +9,13 @@ use crate::core::{
     models::{Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId, ToolOutput},
     registry::PluginRegistryScope,
 };
+
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+struct QuestionInputSchema {
+    question: String,
+    choices: Option<Vec<String>>,
+}
 
 pub struct ToolQuestion {
     id: ToolId,
@@ -31,12 +39,8 @@ impl Tool for ToolQuestion {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "question".into(),
-            description: "Ask the user a question and stop this turn.".into(),
-            input_schema: json!({
-                "type": "object",
-                "required": ["question"],
-                "properties": { "question": { "type": "string" }, "choices": { "type": "array", "items": { "type": "string" } } }
-            }),
+            description: "Ask the user for information that the agent cannot safely infer. Provide the question and optional string choices. The question is stored as pending UI/plugin state and this tool returns Stop, ending the current provider turn without cancellation; the user's next response starts a normal new turn.".into(),
+            input_schema: crate::utils::schema::json_schema::<QuestionInputSchema>(),
         }
     }
 

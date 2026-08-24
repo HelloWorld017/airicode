@@ -3,6 +3,7 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::Client;
+use schemars::JsonSchema;
 use serde_json::Value;
 
 use crate::core::{
@@ -10,6 +11,12 @@ use crate::core::{
     models::{Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId, ToolOutput},
     registry::PluginRegistryScope,
 };
+
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+struct WebfetchInputSchema {
+    url: String,
+}
 
 pub struct ToolWebfetch {
     id: ToolId,
@@ -47,8 +54,8 @@ impl Tool for ToolWebfetch {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "webfetch".into(),
-            description: "Fetch a URL with timeout and response-size limits.".into(),
-            input_schema: serde_json::json!({ "type": "object", "required": ["url"], "properties": { "url": { "type": "string" } } }),
+            description: "Fetch an HTTP or HTTPS URL and return a normalized response containing the status and body text. Requests have a timeout and maximum response size, support cancellation, and do not modify the workdir. Non-success HTTP statuses and network/limit failures are returned as tool failures.".into(),
+            input_schema: crate::utils::schema::json_schema::<WebfetchInputSchema>(),
         }
     }
 

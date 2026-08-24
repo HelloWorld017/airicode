@@ -74,9 +74,8 @@ async fn read_and_shell_tools_use_the_shared_workdir_contract() -> Result<()> {
     assert!(content.contains("|fn main() {}"));
 
     let shell = ToolShell::new();
-    let output = shell
-        .execute(json!({ "command": "printf shell-output" }), context)
-        .await?;
+    assert_eq!(shell.definition().input_schema["type"], "string");
+    let output = shell.execute(json!("printf shell-output"), context).await?;
     let ToolOutput::Success { content } = output else {
         panic!("shell failed")
     };

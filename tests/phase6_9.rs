@@ -105,11 +105,7 @@ async fn patch_revalidates_hashline_and_stores_full_diff_as_note() -> Result<()>
     let patch = ToolPatch::new();
     let first = patch
         .execute(
-            json!({
-                "path": "main.rs",
-                "start": format!("{}:{}|", tags[1].line, tags[1].tag),
-                "replacement": "TWO"
-            }),
+            json!(format!("EDIT main.rs\n-{}|\n+TWO", tags[1].tag)),
             context.clone(),
         )
         .await?;
@@ -123,14 +119,69 @@ async fn patch_revalidates_hashline_and_stores_full_diff_as_note() -> Result<()>
     assert_eq!(session.operations.snapshot().await?.notes.len(), 1);
     let stale = patch
         .execute(
-            json!({
-                "path": "main.rs",
-                "start": format!("{}:{}|", tags[1].line, tags[1].tag),
-                "replacement": "again"
-            }),
+            json!(format!("EDIT main.rs\n-{}|\n+again", tags[1].tag)),
             context,
         )
         .await?;
     assert!(matches!(stale, ToolOutput::Failure { content } if content.contains("stale patch")));
+    Ok(())
+}
+
+#[tokio::test]
+async fn patch_supports_add_delete_and_ambiguous_hashline_hints() -> Result<()> {
+    let directory = tempdir()?;
+    let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
+    let session = new_session(SessionId::new(), SessionGroupId::new());
+    let context = ToolContext {
+        project_id: airicode::core::models::ProjectId::new(),
+        session_group_id: session.operations.group_id(),
+        session_id: session.operations.session_id(),
+        turn_id: airicode::core::models::TurnId::new(),
+        operations: session.operations.clone(),
+        workdir: workdir.clone(),
+        cancellation: CancellationToken::new(),
+    };
+    let patch = ToolPatch::new();
+    assert!(matches!(
+        patch
+            .execute(
+                json!("ADD src/hi.txt\n+hi\n+how are you\n+i'm fine thank you and you"),
+                context.clone()
+            )
+            .await?,
+        ToolOutput::Success { .. }
+    ));
+    assert_eq!(
+        workdir.read(Path::new("src/hi.txt")).await?,
+        b"hi\nhow are you\ni'm fine thank you and you\n"
+    );
+
+    workdir
+        .write(Path::new("repeated.txt"), b"same\nother\nsame\n")
+        .await?;
+    let repeated_tag = hashline::tag("same");
+    let ambiguous = patch
+        .execute(
+            json!(format!("EDIT repeated.txt\n-{}|\n+changed", repeated_tag)),
+            context.clone(),
+        )
+        .await?;
+    assert!(matches!(ambiguous, ToolOutput::Failure { content } if content.contains("ambiguous")));
+    patch
+        .execute(
+            json!(format!(
+                "EDIT repeated.txt@@3\n-{}|\n+changed",
+                repeated_tag
+            )),
+            context.clone(),
+        )
+        .await?;
+    assert_eq!(
+        workdir.read(Path::new("repeated.txt")).await?,
+        b"same\nother\nchanged\n"
+    );
+
+    patch.execute(json!("DEL src/hi.txt"), context).await?;
+    assert!(workdir.read(Path::new("src/hi.txt")).await.is_err());
     Ok(())
 }

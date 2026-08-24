@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -9,6 +10,20 @@ use crate::core::{
     models::{Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId, ToolOutput},
     registry::PluginRegistryScope,
 };
+
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+struct TodoInputSchema {
+    todos: Vec<TodoItemSchema>,
+}
+
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+struct TodoItemSchema {
+    content: String,
+    status: Option<String>,
+    priority: Option<String>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TodoItem {
@@ -39,12 +54,8 @@ impl Tool for ToolTodo {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "todo".into(),
-            description: "Replace the session todo list.".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "required": ["todos"],
-                "properties": { "todos": { "type": "array" } }
-            }),
+            description: "Replace the durable session todo list with the complete array supplied in `todos`; send the full desired state rather than a delta. Each item needs `content` and may use `pending`, `in_progress`, `completed`, or `cancelled` status plus a priority. The updated list is stored in the todo plugin namespace and a short count is returned.".into(),
+            input_schema: crate::utils::schema::json_schema::<TodoInputSchema>(),
         }
     }
 
