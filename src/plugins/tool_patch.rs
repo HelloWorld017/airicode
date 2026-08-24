@@ -14,6 +14,8 @@ use crate::{
     utils::hashline,
 };
 
+const MIN_CONTEXT_LINES: usize = 3;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OperationKind {
     Add,
@@ -77,7 +79,7 @@ impl Tool for ToolPatch {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "patch".into(),
-            description: r#"Apply a raw diff-like patch to root-relative workdir files. Headers are `ADD path`, `DEL path`, or `EDIT path`; an EDIT may use `EDIT path@@<line>` to disambiguate a repeated match. In an EDIT body, context lines use ` <hash>|`, deleted lines use `-<hash>|`, and new lines use `+<text>`; hashes must be copied from read output (the part after `<line>:` and before `|`). Context is preserved, deletion lines are removed, and additions are inserted. The complete sequence of context/deletion hashes must match the current file exactly once. A stale match fails, and multiple matches fail unless `@@<line>` identifies the starting line. ADD accepts only `+` lines and DEL has no body."#.into(),
+            description: r#"Apply a raw diff-like patch to root-relative workdir files. Headers are `ADD path`, `DEL path`, or `EDIT path`; an EDIT may use `EDIT path@@<line>` to disambiguate a repeated match. In an EDIT body, context lines use ` <hash>|`, deleted lines use `-<hash>|`, and new lines use `+<text>`; hashes must be copied from read output (the part after `<line>:` and before `|`). Context is preserved, deletion lines are removed, and additions are inserted. The complete sequence of context/deletion hashes must match the current file exactly once. An edit must include up to three available unchanged hashline context lines before and after its changed lines; `@@<line>` does not bypass this requirement. A stale match fails, and multiple matches fail unless `@@<line>` identifies the starting line. ADD accepts only `+` lines and DEL has no body."#.into(),
             input_schema: crate::utils::schema::json_schema::<String>(),
         }
     }
@@ -253,6 +255,7 @@ impl ToolPatch {
             })
             .collect::<Vec<_>>();
         let start = find_unique_match(&old_lines, &pattern, operation.line_hint)?;
+        validate_context(&operation.body, &old_lines, start)?;
         let replacement = replacement_text(&operation.body, &old_lines, start)?;
         let end = start + pattern.len();
         let new = if pattern.is_empty() {
@@ -412,7 +415,7 @@ fn find_unique_match(
     }
     if pattern.len() > lines.len() {
         return Err(ApplyError::Failure(
-            "stale patch: no matching hashline context".into(),
+            "stale patch: no matching hashline context. read file and retry".into(),
         ));
     }
     let mut matches = Vec::new();
@@ -434,9 +437,64 @@ fn find_unique_match(
             "stale patch: no matching hashline context".into(),
         )),
         _ => Err(ApplyError::Failure(
-            "ambiguous patch: multiple hashline matches; add @@<line> to the header".into(),
+            "ambiguous patch: multiple hashline matches; add more context or add @@<line> to the header".into(),
         )),
     }
+}
+
+fn validate_context(
+    body: &[BodyLine],
+    lines: &[hashline::HashLine],
+    start: usize,
+) -> std::result::Result<(), ApplyError> {
+    let Some(first_change) = body.iter().position(is_change) else {
+        return Ok(());
+    };
+    let Some(last_change) = body.iter().rposition(is_change) else {
+        return Ok(());
+    };
+
+    let before_context = body[..first_change]
+        .iter()
+        .filter(|line| matches!(line, BodyLine::Context(_)))
+        .count();
+    let after_context = body[last_change + 1..]
+        .iter()
+        .filter(|line| matches!(line, BodyLine::Context(_)))
+        .count();
+
+    let mut old_offset = 0;
+    let mut changed_start = None;
+    let mut changed_end = None;
+    for line in body {
+        match line {
+            BodyLine::Context(_) => old_offset += 1,
+            BodyLine::Delete(_) => {
+                changed_start.get_or_insert(old_offset);
+                old_offset += 1;
+                changed_end = Some(old_offset);
+            }
+            BodyLine::Add(_) => {
+                let offset = changed_start.get_or_insert(old_offset);
+                changed_end = Some((*offset).max(old_offset));
+            }
+        }
+    }
+
+    let changed_start = start + changed_start.unwrap_or(0);
+    let changed_end = start + changed_end.unwrap_or(0);
+    let required_before = MIN_CONTEXT_LINES.min(changed_start);
+    let required_after = MIN_CONTEXT_LINES.min(lines.len().saturating_sub(changed_end));
+    if before_context < required_before || after_context < required_after {
+        return Err(ApplyError::Failure(format!(
+            "insufficient hashline context: include at least {required_before} line(s) before and {required_after} line(s) after the change"
+        )));
+    }
+    Ok(())
+}
+
+fn is_change(line: &BodyLine) -> bool {
+    matches!(line, BodyLine::Delete(_) | BodyLine::Add(_))
 }
 
 fn replacement_text(

@@ -105,7 +105,10 @@ async fn patch_revalidates_hashline_and_stores_full_diff_as_note() -> Result<()>
     let patch = ToolPatch::new();
     let first = patch
         .execute(
-            json!(format!("EDIT main.rs\n-{}|\n+TWO", tags[1].tag)),
+            json!(format!(
+                "EDIT main.rs\n {}|\n-{}|\n+TWO\n {}|",
+                tags[0].tag, tags[1].tag, tags[2].tag
+            )),
             context.clone(),
         )
         .await?;
@@ -119,7 +122,10 @@ async fn patch_revalidates_hashline_and_stores_full_diff_as_note() -> Result<()>
     assert_eq!(session.operations.snapshot().await?.notes.len(), 1);
     let stale = patch
         .execute(
-            json!(format!("EDIT main.rs\n-{}|\n+again", tags[1].tag)),
+            json!(format!(
+                "EDIT main.rs\n {}|\n-{}|\n+again\n {}|",
+                tags[0].tag, tags[1].tag, tags[2].tag
+            )),
             context,
         )
         .await?;
@@ -157,31 +163,94 @@ async fn patch_supports_add_delete_and_ambiguous_hashline_hints() -> Result<()> 
     );
 
     workdir
-        .write(Path::new("repeated.txt"), b"same\nother\nsame\n")
+        .write(
+            Path::new("repeated.txt"),
+            b"before one\nbefore two\nbefore three\nsame\nafter one\nafter two\nafter three\nbefore one\nbefore two\nbefore three\nsame\nafter one\nafter two\nafter three\n",
+        )
         .await?;
     let repeated_tag = hashline::tag("same");
+    let before_one_tag = hashline::tag("before one");
+    let before_two_tag = hashline::tag("before two");
+    let before_three_tag = hashline::tag("before three");
+    let after_one_tag = hashline::tag("after one");
+    let after_two_tag = hashline::tag("after two");
+    let after_three_tag = hashline::tag("after three");
+    let repeated_body = format!(
+        " {before_one_tag}|\n {before_two_tag}|\n {before_three_tag}|\n-{repeated_tag}|\n+changed\n {after_one_tag}|\n {after_two_tag}|\n {after_three_tag}|"
+    );
     let ambiguous = patch
         .execute(
-            json!(format!("EDIT repeated.txt\n-{}|\n+changed", repeated_tag)),
+            json!(format!("EDIT repeated.txt\n{repeated_body}")),
             context.clone(),
         )
         .await?;
     assert!(matches!(ambiguous, ToolOutput::Failure { content } if content.contains("ambiguous")));
     patch
         .execute(
-            json!(format!(
-                "EDIT repeated.txt@@3\n-{}|\n+changed",
-                repeated_tag
-            )),
+            json!(format!("EDIT repeated.txt@@8\n{repeated_body}")),
             context.clone(),
         )
         .await?;
     assert_eq!(
         workdir.read(Path::new("repeated.txt")).await?,
-        b"same\nother\nchanged\n"
+        b"before one\nbefore two\nbefore three\nsame\nafter one\nafter two\nafter three\nbefore one\nbefore two\nbefore three\nchanged\nafter one\nafter two\nafter three\n"
     );
 
     patch.execute(json!("DEL src/hi.txt"), context).await?;
     assert!(workdir.read(Path::new("src/hi.txt")).await.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn patch_rejects_insufficient_context_even_with_line_hint() -> Result<()> {
+    let directory = tempdir()?;
+    let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
+    workdir
+        .write(Path::new("context.txt"), b"one\ntwo\nthree\nfour\nfive\n")
+        .await?;
+    let session = new_session(SessionId::new(), SessionGroupId::new());
+    let context = ToolContext {
+        project_id: airicode::core::models::ProjectId::new(),
+        session_group_id: session.operations.group_id(),
+        session_id: session.operations.session_id(),
+        turn_id: airicode::core::models::TurnId::new(),
+        operations: session.operations.clone(),
+        workdir: workdir.clone(),
+        cancellation: CancellationToken::new(),
+    };
+    let patch = ToolPatch::new();
+    let target_tag = hashline::tag("three");
+    let insufficient = patch
+        .execute(
+            json!(format!("EDIT context.txt@@3\n-{target_tag}|\n+THREE")),
+            context.clone(),
+        )
+        .await?;
+    assert!(
+        matches!(insufficient, ToolOutput::Failure { content } if content.contains("insufficient hashline context"))
+    );
+    assert_eq!(
+        workdir.read(Path::new("context.txt")).await?,
+        b"one\ntwo\nthree\nfour\nfive\n"
+    );
+
+    workdir
+        .write(Path::new("short.txt"), b"one\ntwo\nthree\n")
+        .await?;
+    let short = hashline::render("one\ntwo\nthree\n");
+    let accepted = patch
+        .execute(
+            json!(format!(
+                "EDIT short.txt@@1\n {}|\n-{}|\n+TWO\n {}|",
+                short[0].tag, short[1].tag, short[2].tag
+            )),
+            context,
+        )
+        .await?;
+    assert!(matches!(accepted, ToolOutput::Success { .. }));
+    assert_eq!(
+        workdir.read(Path::new("short.txt")).await?,
+        b"one\nTWO\nthree\n"
+    );
     Ok(())
 }
