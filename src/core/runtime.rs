@@ -11,9 +11,9 @@ use super::{
         ContextContributionContext,
     },
     models::{
-        ContextPriority, ContextSource, FinishReason, Message, MessagePart, ProjectId,
-        ProviderEvent, ProviderRequest, Role, RuntimeEvent, SessionGroupId, SessionId, ToolCallId,
-        ToolOutput, TurnId,
+        ContextContributionPosition, ContextPriority, ContextSource, FinishReason, Message,
+        MessagePart, ProjectId, ProviderEvent, ProviderRequest, Role, RuntimeEvent, SessionGroupId,
+        SessionId, ToolCallId, ToolOutput, TurnId,
     },
     operations::Operations,
     registry::Registry,
@@ -27,6 +27,7 @@ pub struct TurnRequest {
     pub session_id: SessionId,
     pub provider_id: super::models::ProviderId,
     pub model: String,
+    pub mode: String,
     pub input: String,
     pub cancellation: CancellationToken,
 }
@@ -46,9 +47,15 @@ impl TurnRequest {
             session_id,
             provider_id,
             model: model.into(),
+            mode: super::models::DEFAULT_MODE.into(),
             input: input.into(),
             cancellation: CancellationToken::new(),
         }
+    }
+
+    pub fn with_mode(mut self, mode: impl Into<String>) -> Self {
+        self.mode = mode.into();
+        self
     }
 }
 
@@ -70,7 +77,12 @@ impl TurnEngine {
 
     pub async fn run(&self, request: TurnRequest) -> Result<TurnId> {
         let turn_id = TurnId::new();
-        let user = Message::text(Role::User, request.input.clone(), Some(turn_id));
+        let user = Message::text_with_mode(
+            Role::User,
+            request.input.clone(),
+            Some(turn_id),
+            request.mode.clone(),
+        );
         let user_for_hook = Arc::new(user.clone());
         for hook in self.registry.hooks().before_message.clone() {
             hook.before_message(BeforeMessageContext {
@@ -110,7 +122,12 @@ impl TurnEngine {
                         }
                     }
                     ContextSource::Custom(text) => {
-                        messages.push(Arc::new(Message::text(Role::System, text, Some(turn_id))))
+                        messages.push(Arc::new(Message::text_with_mode(
+                            Role::System,
+                            text,
+                            Some(turn_id),
+                            request.mode.clone(),
+                        )))
                     }
                 }
             }
@@ -122,13 +139,7 @@ impl TurnEngine {
                     messages: messages.clone(),
                 })
                 .await?;
-            for contribution in contributions {
-                messages.push(Arc::new(Message::text(
-                    Role::System,
-                    contribution.text,
-                    Some(turn_id),
-                )));
-            }
+            messages = materialize_context(messages, contributions, turn_id, &request.mode);
             let tools = self
                 .registry
                 .tools()
@@ -173,6 +184,7 @@ impl TurnEngine {
                 id: super::models::MessageId::new(),
                 turn_id: Some(turn_id),
                 role: Role::Assistant,
+                mode: request.mode.clone(),
                 content: round.parts,
                 created_at: super::models::TimeSeq::new(),
                 metadata: BTreeMap::new(),
@@ -196,6 +208,7 @@ impl TurnEngine {
                     self.commit_tool_result(
                         turn_id,
                         call.id.clone(),
+                        request.mode.clone(),
                         ToolOutput::Failure {
                             content: "Cancelled because execution stopped for user input.".into(),
                         },
@@ -227,7 +240,7 @@ impl TurnEngine {
                         output: output.1.clone(),
                     })
                     .await?;
-                self.commit_tool_result(turn_id, output.0, output.1.clone())
+                self.commit_tool_result(turn_id, output.0, request.mode.clone(), output.1.clone())
                     .await?;
                 if matches!(output.1, ToolOutput::Stop) {
                     stop = true;
@@ -385,6 +398,7 @@ impl TurnEngine {
         &self,
         turn_id: TurnId,
         call_id: ToolCallId,
+        mode: String,
         output: ToolOutput,
     ) -> Result<()> {
         let summary = match &output {
@@ -402,6 +416,7 @@ impl TurnEngine {
             id: super::models::MessageId::new(),
             turn_id: Some(turn_id),
             role: Role::Tool,
+            mode,
             content: vec![MessagePart::ToolResult {
                 call_id,
                 summary,
@@ -417,6 +432,48 @@ impl TurnEngine {
     }
 }
 
+fn materialize_context(
+    messages: Vec<Arc<Message>>,
+    contributions: Vec<super::models::ContextContribution>,
+    turn_id: TurnId,
+    mode: &str,
+) -> Vec<Arc<Message>> {
+    let mut start = Vec::new();
+    let mut timeline = Vec::new();
+    let mut end = Vec::new();
+    for contribution in contributions {
+        let message = Arc::new(Message::text_with_mode(
+            Role::System,
+            contribution.text,
+            Some(turn_id),
+            mode,
+        ));
+        match contribution.position {
+            ContextContributionPosition::Start => start.push(message),
+            ContextContributionPosition::Timeline(created_at) => {
+                timeline.push((created_at, message))
+            }
+            ContextContributionPosition::End => end.push(message),
+        }
+    }
+    timeline.sort_by_key(|(created_at, _)| *created_at);
+    let mut materialized = start;
+    let mut timeline_index = 0;
+    for message in messages {
+        while timeline_index < timeline.len() && timeline[timeline_index].0 <= message.created_at {
+            materialized.push(timeline[timeline_index].1.clone());
+            timeline_index += 1;
+        }
+        materialized.push(message);
+    }
+    while timeline_index < timeline.len() {
+        materialized.push(timeline[timeline_index].1.clone());
+        timeline_index += 1;
+    }
+    materialized.extend(end);
+    materialized
+}
+
 struct CollectedRound {
     parts: Vec<MessagePart>,
     calls: Vec<AssembledCall>,
@@ -427,4 +484,61 @@ struct AssembledCall {
     provider_id: Option<String>,
     name: String,
     arguments: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::models::{ContextContribution, ContextPriority, MessagePart};
+    use crate::utils::TimeSeq;
+
+    fn message(text: &str, created_at: TimeSeq) -> Arc<Message> {
+        let mut message = Message::text(Role::User, text, None);
+        message.created_at = created_at;
+        Arc::new(message)
+    }
+
+    fn contribution(text: &str, position: ContextContributionPosition) -> ContextContribution {
+        ContextContribution {
+            priority: ContextPriority::Persistent,
+            position,
+            text: text.into(),
+            metadata: Default::default(),
+        }
+    }
+
+    fn text(message: &Message) -> &str {
+        match &message.content[0] {
+            MessagePart::Text { text } => text,
+            _ => panic!("expected a text message"),
+        }
+    }
+
+    #[test]
+    fn materializes_contributions_at_start_timeline_and_end() {
+        let result = materialize_context(
+            vec![
+                message("old", TimeSeq::from_parts(10, 0)),
+                message("new", TimeSeq::from_parts(20, 0)),
+            ],
+            vec![
+                contribution("end", ContextContributionPosition::End),
+                contribution(
+                    "between",
+                    ContextContributionPosition::Timeline(TimeSeq::from_parts(15, 0)),
+                ),
+                contribution("start", ContextContributionPosition::Start),
+            ],
+            TurnId::new(),
+            "build",
+        );
+
+        assert_eq!(
+            result
+                .iter()
+                .map(|message| text(message))
+                .collect::<Vec<_>>(),
+            ["start", "old", "between", "new", "end"]
+        );
+    }
 }

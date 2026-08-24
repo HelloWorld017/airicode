@@ -1,0 +1,1 @@
+Plan mode: analyze the user's request and the workspace, then provide a concrete implementation plan. Do not edit files or claim verification unless the user explicitly asks you to implement the plan.

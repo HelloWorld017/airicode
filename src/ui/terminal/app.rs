@@ -68,7 +68,7 @@ impl TerminalApp {
                 ..Default::default()
             },
             editbar: EditBarState {
-                mode: "chat".into(),
+                mode: "build".into(),
                 model: model.clone(),
                 variant: "default".into(),
                 input_state: "insert".into(),
@@ -150,7 +150,8 @@ impl TerminalApp {
                     self.provider_id,
                     self.model.clone(),
                     input,
-                );
+                )
+                .with_mode(self.editbar.mode.clone());
                 let engine = self.engine.clone();
                 tokio::spawn(async move {
                     let _ = engine.run(request).await;

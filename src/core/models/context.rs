@@ -5,6 +5,15 @@ use super::message::Metadata;
 use crate::utils::TimeSeq;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ContextContributionPosition {
+    Start,
+    Timeline(TimeSeq),
+    End,
+}
+
+pub type ContextPosition = ContextContributionPosition;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ContextPriority {
     Persistent,
     High,
@@ -30,6 +39,7 @@ pub struct ContextPart {
 #[derive(Clone, Debug)]
 pub struct ContextContribution {
     pub priority: ContextPriority,
+    pub position: ContextContributionPosition,
     pub text: String,
     pub metadata: Metadata,
 }

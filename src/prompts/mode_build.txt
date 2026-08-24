@@ -1,0 +1,1 @@
+Build mode: implement the user's requested changes in the workspace. Prefer the smallest correct change, inspect relevant code before editing, and verify the result with appropriate tests or checks.

@@ -6,11 +6,16 @@ use serde_json::Value;
 use crate::core::{
     error::Result,
     hooks::{ContextContributionContext, ContextContributionHook},
-    models::{ContextContribution, ContextPriority, Plugin, PluginId},
+    models::{
+        ContextContribution, ContextContributionPosition, ContextPriority, Plugin, PluginId,
+        DEFAULT_MODE,
+    },
     registry::PluginRegistryScope,
 };
 
-pub const DEFAULT_BASE_INSTRUCTION: &str = "You are AiriCode, a careful coding agent. Inspect the workspace before editing, use the provided tools, and report verification results clearly.";
+pub const DEFAULT_BASE_INSTRUCTION: &str = include_str!("../prompts/system.txt");
+const BUILD_INSTRUCTION: &str = include_str!("../prompts/mode_build.txt");
+const PLAN_INSTRUCTION: &str = include_str!("../prompts/mode_plan.txt");
 
 pub struct InstructionBasePlugin {
     id: PluginId,
@@ -41,13 +46,37 @@ impl Default for InstructionBasePlugin {
 impl ContextContributionHook for InstructionBasePlugin {
     async fn contribute(
         &self,
-        _context: ContextContributionContext,
+        context: ContextContributionContext,
     ) -> Result<Vec<ContextContribution>> {
-        Ok(vec![ContextContribution {
+        let mut contributions = vec![ContextContribution {
             priority: ContextPriority::Persistent,
+            position: ContextContributionPosition::Start,
             text: self.instruction.to_string(),
             metadata: Default::default(),
-        }])
+        }];
+        let mode = context
+            .messages
+            .iter()
+            .max_by_key(|message| message.created_at)
+            .map(|message| message.mode.as_str())
+            .unwrap_or(DEFAULT_MODE);
+        if let Some(instruction) = mode_instruction(mode) {
+            contributions.push(ContextContribution {
+                priority: ContextPriority::Persistent,
+                position: ContextContributionPosition::End,
+                text: instruction.to_string(),
+                metadata: Default::default(),
+            });
+        }
+        Ok(contributions)
+    }
+}
+
+fn mode_instruction(mode: &str) -> Option<&'static str> {
+    match mode {
+        "build" => Some(BUILD_INSTRUCTION),
+        "plan" => Some(PLAN_INSTRUCTION),
+        _ => None,
     }
 }
 
@@ -68,5 +97,41 @@ impl Plugin for InstructionBasePlugin {
     async fn init(self: Arc<Self>, registry: PluginRegistryScope) -> Result<()> {
         let hook: Arc<dyn ContextContributionHook> = self;
         registry.register_hook(hook)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::core::{
+        hooks::ContextContributionContext,
+        models::{Message, Role, TurnId},
+    };
+
+    #[tokio::test]
+    async fn loads_system_and_plan_prompts_at_their_positions() {
+        let plugin = InstructionBasePlugin::new();
+        let message = Message::text_with_mode(Role::User, "plan this", None, "plan");
+        let contributions = plugin
+            .contribute(ContextContributionContext {
+                turn_id: TurnId::new(),
+                messages: vec![Arc::new(message)],
+            })
+            .await
+            .expect("instruction contribution should succeed");
+
+        assert_eq!(contributions.len(), 2);
+        assert_eq!(
+            contributions[0].position,
+            ContextContributionPosition::Start
+        );
+        assert_eq!(contributions[0].text, include_str!("../prompts/system.txt"));
+        assert_eq!(contributions[1].position, ContextContributionPosition::End);
+        assert_eq!(
+            contributions[1].text,
+            include_str!("../prompts/mode_plan.txt")
+        );
     }
 }
