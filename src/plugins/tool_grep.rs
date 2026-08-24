@@ -142,10 +142,10 @@ pub struct ToolGrepPlugin {
     tool: Arc<ToolGrep>,
 }
 impl ToolGrepPlugin {
-    pub fn new(tool: Arc<ToolGrep>) -> Self {
+    pub fn new() -> Self {
         Self {
             id: PluginId::new(),
-            tool,
+            tool: Arc::new(ToolGrep::new()),
         }
     }
 }

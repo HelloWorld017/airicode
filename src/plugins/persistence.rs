@@ -4,18 +4,15 @@ use std::{
     sync::Arc,
 };
 
+use crate::core::{
+    error::{Error, Result},
+    models::{Plugin, PluginId, ProjectId, SessionCommit, SessionId},
+    registry::PluginRegistryScope,
+};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::Mutex};
-use uuid::Uuid;
-
-use crate::core::{
-    error::{Error, Result},
-    models::{Plugin, PluginId, SessionCommit, SessionId},
-    registry::PluginRegistryScope,
-};
 
 pub use crate::core::persistence::SessionStore;
 
@@ -79,8 +76,8 @@ impl JsonlSessionStore {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("project");
-        let project_dir =
-            data_root.join(format!("{}-{}", project_name, project_hash(&project_root)));
+        let project_id = ProjectId::from_workdir(&project_root);
+        let project_dir = data_root.join(format!("{project_name}-{project_id}"));
         Ok(Self {
             root: Arc::new(project_dir.join("sessions")),
             lock: Arc::new(Mutex::new(())),
@@ -117,10 +114,10 @@ impl JsonlSessionStore {
             let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
                 continue;
             };
-            let uuid = Uuid::parse_str(stem).map_err(|error| {
+            let session_id = stem.parse::<SessionId>().map_err(|error| {
                 Error::Persistence(format!("invalid session filename {stem}: {error}"))
             })?;
-            sessions.push(SessionId::from_uuid(uuid));
+            sessions.push(session_id);
         }
         sessions.sort_unstable();
         Ok(sessions)
@@ -236,17 +233,6 @@ impl SessionStore for JsonlSessionStore {
         file.sync_data().await?;
         Ok(())
     }
-}
-
-pub fn project_hash(project_root: &Path) -> String {
-    let mut digest = Sha256::new();
-    digest.update(project_root.as_os_str().to_string_lossy().as_bytes());
-    digest
-        .finalize()
-        .iter()
-        .take(12)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 pub fn default_data_root() -> Result<PathBuf> {

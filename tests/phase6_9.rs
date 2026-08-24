@@ -22,8 +22,9 @@ use tokio_util::sync::CancellationToken;
 #[tokio::test]
 async fn jsonl_store_replays_and_recovers_an_incomplete_tail() -> Result<()> {
     let directory = tempdir()?;
-    let session_id = SessionId::new();
-    let session = new_session(session_id, SessionGroupId::new());
+    let group_id = SessionGroupId::new();
+    let session_id = SessionId::new(group_id);
+    let session = new_session(session_id, group_id);
     session
         .operations
         .add_conversation_message(
@@ -71,8 +72,9 @@ async fn jsonl_store_replays_and_recovers_an_incomplete_tail() -> Result<()> {
 async fn persisted_session_actor_does_not_advance_when_append_fails() -> Result<()> {
     let directory = tempdir()?;
     let store = JsonlSessionStore::new_at(directory.path().join("missing"));
+    let group_id = SessionGroupId::new();
     let session = airicode::core::SessionHandle::spawn_with_store(
-        airicode::core::models::SessionState::new(SessionId::new(), SessionGroupId::new()),
+        airicode::core::models::SessionState::new(SessionId::new(group_id), group_id),
         Some(Arc::new(store)),
     );
     let result = session
@@ -91,9 +93,10 @@ async fn patch_revalidates_hashline_and_stores_full_diff_as_note() -> Result<()>
     workdir
         .write(Path::new("main.rs"), b"one\ntwo\nthree\n")
         .await?;
-    let session = new_session(SessionId::new(), SessionGroupId::new());
+    let group_id = SessionGroupId::new();
+    let session = new_session(SessionId::new(group_id), group_id);
     let context = ToolContext {
-        project_id: airicode::core::models::ProjectId::new(),
+        project_id: airicode::core::models::ProjectId::from_workdir(directory.path()),
         session_group_id: session.operations.group_id(),
         session_id: session.operations.session_id(),
         turn_id: airicode::core::models::TurnId::new(),
@@ -137,9 +140,10 @@ async fn patch_revalidates_hashline_and_stores_full_diff_as_note() -> Result<()>
 async fn patch_supports_add_delete_and_ambiguous_hashline_hints() -> Result<()> {
     let directory = tempdir()?;
     let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
-    let session = new_session(SessionId::new(), SessionGroupId::new());
+    let group_id = SessionGroupId::new();
+    let session = new_session(SessionId::new(group_id), group_id);
     let context = ToolContext {
-        project_id: airicode::core::models::ProjectId::new(),
+        project_id: airicode::core::models::ProjectId::from_workdir(directory.path()),
         session_group_id: session.operations.group_id(),
         session_id: session.operations.session_id(),
         turn_id: airicode::core::models::TurnId::new(),
@@ -208,9 +212,10 @@ async fn patch_rejects_insufficient_context_even_with_line_hint() -> Result<()> 
     workdir
         .write(Path::new("context.txt"), b"one\ntwo\nthree\nfour\nfive\n")
         .await?;
-    let session = new_session(SessionId::new(), SessionGroupId::new());
+    let group_id = SessionGroupId::new();
+    let session = new_session(SessionId::new(group_id), group_id);
     let context = ToolContext {
-        project_id: airicode::core::models::ProjectId::new(),
+        project_id: airicode::core::models::ProjectId::from_workdir(directory.path()),
         session_group_id: session.operations.group_id(),
         session_id: session.operations.session_id(),
         turn_id: airicode::core::models::TurnId::new(),

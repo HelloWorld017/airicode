@@ -16,8 +16,8 @@ use std::path::PathBuf;
 
 #[test]
 fn reducer_replays_atomic_conversation_and_invalidation() -> airicode::Result<()> {
-    let session_id = SessionId::new();
     let group_id = SessionGroupId::new();
+    let session_id = SessionId::new(group_id);
     let message = Message::text(Role::User, "hello", "build", None);
     let part = airicode::core::models::ContextPart {
         id: airicode::core::models::ContextPartId::new(),
@@ -58,8 +58,8 @@ fn reducer_replays_atomic_conversation_and_invalidation() -> airicode::Result<()
 
 #[test]
 fn context_is_sorted_by_time_sequence_not_priority() -> airicode::Result<()> {
-    let session_id = SessionId::new();
     let group_id = SessionGroupId::new();
+    let session_id = SessionId::new(group_id);
     let older_message = Message::text(Role::User, "older", "build", None);
     let newer_message = Message::text(Role::User, "newer", "build", None);
     let older_message_id = older_message.id;
@@ -104,7 +104,8 @@ fn context_is_sorted_by_time_sequence_not_priority() -> airicode::Result<()> {
 
 #[tokio::test]
 async fn actor_commits_message_and_context_as_one_operation() -> airicode::Result<()> {
-    let session = new_session(SessionId::new(), SessionGroupId::new());
+    let group_id = SessionGroupId::new();
+    let session = new_session(SessionId::new(group_id), group_id);
     let message = Message::text(Role::User, "atomic", "build", None);
     let (message_id, context_id) = session
         .operations
@@ -220,7 +221,7 @@ async fn registry_registers_and_dispatches_shell_actions() -> airicode::Result<(
         .handle_args(
             ["inspect", "one", "two"],
             ShellActionContext {
-                project_id: airicode::core::models::ProjectId::new(),
+                project_id: airicode::core::models::ProjectId::from_workdir(directory.path()),
                 workdir: Arc::new(airicode::core::workdir::NativeWorkdir::new(PathBuf::from(
                     directory.path(),
                 ))?),
@@ -237,7 +238,8 @@ async fn registry_registers_and_dispatches_shell_actions() -> airicode::Result<(
 
 #[test]
 fn reducer_rejects_sequence_gaps() {
-    let mut state = SessionState::new(SessionId::new(), SessionGroupId::new());
+    let group_id = SessionGroupId::new();
+    let mut state = SessionState::new(SessionId::new(group_id), group_id);
     let commit = airicode::core::models::SessionCommit::new(
         2,
         vec![SessionMutation::DurableUIStateUpdated {
@@ -249,7 +251,8 @@ fn reducer_rejects_sequence_gaps() {
 
 #[test]
 fn reducer_does_not_apply_a_partial_invalid_commit() {
-    let mut state = SessionState::new(SessionId::new(), SessionGroupId::new());
+    let group_id = SessionGroupId::new();
+    let mut state = SessionState::new(SessionId::new(group_id), group_id);
     let message = Message::text(Role::User, "must not persist", "build", None);
     let commit = airicode::core::models::SessionCommit::new(
         1,

@@ -111,10 +111,10 @@ pub struct ToolTodoPlugin {
     tool: Arc<ToolTodo>,
 }
 impl ToolTodoPlugin {
-    pub fn new(tool: Arc<ToolTodo>) -> Self {
+    pub fn new() -> Self {
         Self {
             id: PluginId::new(),
-            tool,
+            tool: Arc::new(ToolTodo::new()),
         }
     }
 }

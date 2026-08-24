@@ -363,7 +363,7 @@ impl TurnEngine {
         let input = serde_json::from_str::<Value>(&call.arguments)
             .unwrap_or_else(|_| Value::String(call.arguments.clone()));
         let context = super::models::ToolContext {
-            project_id: request.project_id,
+            project_id: request.project_id.clone(),
             session_group_id: request.session_group_id,
             session_id: request.session_id,
             turn_id,

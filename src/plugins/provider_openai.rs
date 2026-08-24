@@ -28,7 +28,7 @@ impl OpenAiProvider {
         Self {
             id,
             api_key: Arc::new(RwLock::new(api_key.into())),
-            base_url: Arc::new(RwLock::new("https://api.openai.com/v1".into())),
+            base_url: Arc::new(RwLock::new("https://openrouter.ai/v1".into())),
             client: Client::new(),
         }
     }

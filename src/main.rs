@@ -4,9 +4,8 @@ use airicode::{
     core::{project_from_path, CoreBuilder, ProviderId, SessionGroupId},
     plugins::{
         InstructionBasePlugin, JsonlSessionStore, OpenAiProvider, OpenAiProviderPlugin,
-        PersistencePlugin, ToolGrep, ToolGrepPlugin, ToolPatch, ToolPatchPlugin, ToolQuestion,
-        ToolQuestionPlugin, ToolRead, ToolReadPlugin, ToolShell, ToolShellPlugin, ToolTodo,
-        ToolTodoPlugin, ToolWebfetch, ToolWebfetchPlugin,
+        PersistencePlugin, ToolGrepPlugin, ToolPatchPlugin, ToolQuestion, ToolQuestionPlugin,
+        ToolReadPlugin, ToolShellPlugin, ToolTodoPlugin, ToolWebfetch, ToolWebfetchPlugin,
     },
     ui::terminal::TerminalApp,
 };
@@ -17,20 +16,20 @@ async fn main() -> airicode::Result<()> {
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or(std::env::current_dir()?);
+    let root = std::fs::canonicalize(root)?;
 
     let project = project_from_path(root.clone());
     let workdir = Arc::new(airicode::core::workdir::NativeWorkdir::new(root.clone())?);
     let store = Arc::new(JsonlSessionStore::new(root)?);
-    let group_id = SessionGroupId::new();
     let provider_id = ProviderId::new();
     let mut builder = CoreBuilder::new()
         .plugin(Arc::new(PersistencePlugin::new(store.clone())))
         .plugin(Arc::new(InstructionBasePlugin::new()))
-        .plugin(Arc::new(ToolReadPlugin::new(Arc::new(ToolRead::new()))))
-        .plugin(Arc::new(ToolShellPlugin::new(Arc::new(ToolShell::new()))))
-        .plugin(Arc::new(ToolPatchPlugin::new(Arc::new(ToolPatch::new()))))
-        .plugin(Arc::new(ToolGrepPlugin::new(Arc::new(ToolGrep::new()))))
-        .plugin(Arc::new(ToolTodoPlugin::new(Arc::new(ToolTodo::new()))))
+        .plugin(Arc::new(ToolReadPlugin::new()))
+        .plugin(Arc::new(ToolShellPlugin::new()))
+        .plugin(Arc::new(ToolPatchPlugin::new()))
+        .plugin(Arc::new(ToolGrepPlugin::new()))
+        .plugin(Arc::new(ToolTodoPlugin::new()))
         .plugin(Arc::new(ToolQuestionPlugin::new(Arc::new(
             ToolQuestion::new(),
         ))))
@@ -43,9 +42,15 @@ async fn main() -> airicode::Result<()> {
         ))));
     }
     let core = builder.build().await?;
-    let session = match store.discover().await?.into_iter().next() {
-        Some(session_id) => core.load_session(session_id, group_id).await?,
-        None => core.create_session(group_id),
+    let (session, group_id) = match store.discover().await?.into_iter().next() {
+        Some(session_id) => {
+            let group_id = session_id.group_id();
+            (core.load_session(session_id, group_id).await?, group_id)
+        }
+        None => {
+            let group_id = SessionGroupId::new();
+            (core.create_session(group_id), group_id)
+        }
     };
     TerminalApp::new(
         session,

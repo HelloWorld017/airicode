@@ -99,10 +99,10 @@ pub struct ToolShellPlugin {
     tool: Arc<ToolShell>,
 }
 impl ToolShellPlugin {
-    pub fn new(tool: Arc<ToolShell>) -> Self {
+    pub fn new() -> Self {
         Self {
             id: PluginId::new(),
-            tool,
+            tool: Arc::new(ToolShell::new()),
         }
     }
     pub fn tool(&self) -> Arc<ToolShell> {

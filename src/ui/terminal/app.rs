@@ -144,7 +144,7 @@ impl TerminalApp {
                 }
                 self.status = "running".into();
                 let request = TurnRequest::new(
-                    self.project_id,
+                    self.project_id.clone(),
                     self.group_id,
                     self.session.operations.session_id(),
                     self.provider_id,

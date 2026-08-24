@@ -617,10 +617,10 @@ pub struct ToolPatchPlugin {
 }
 
 impl ToolPatchPlugin {
-    pub fn new(tool: Arc<ToolPatch>) -> Self {
+    pub fn new() -> Self {
         Self {
             id: PluginId::new(),
-            tool,
+            tool: Arc::new(ToolPatch::new()),
         }
     }
 }

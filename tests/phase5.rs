@@ -49,13 +49,11 @@ async fn read_and_shell_tools_use_the_shared_workdir_contract() -> Result<()> {
     workdir
         .write(Path::new("main.rs"), b"fn main() {}\n")
         .await?;
-    let session = new_session(
-        airicode::core::models::SessionId::new(),
-        SessionGroupId::new(),
-    );
+    let group_id = SessionGroupId::new();
+    let session = new_session(airicode::core::models::SessionId::new(group_id), group_id);
     let context = ToolContext {
-        project_id: ProjectId::new(),
-        session_group_id: SessionGroupId::new(),
+        project_id: ProjectId::from_workdir(directory.path()),
+        session_group_id: group_id,
         session_id: session.operations.session_id(),
         turn_id: TurnId::new(),
         operations: session.operations.clone(),
@@ -118,15 +116,16 @@ async fn fake_provider_completes_a_read_tool_turn_on_a_real_project() -> Result<
     let fake_plugin = Arc::new(FakeProviderPlugin::new(provider));
     let core = airicode::core::CoreBuilder::new()
         .plugin(fake_plugin)
-        .plugin(Arc::new(ToolReadPlugin::new(Arc::new(ToolRead::new()))))
-        .plugin(Arc::new(ToolShellPlugin::new(Arc::new(ToolShell::new()))))
+        .plugin(Arc::new(ToolReadPlugin::new()))
+        .plugin(Arc::new(ToolShellPlugin::new()))
         .build()
         .await?;
-    let session = core.create_session(SessionGroupId::new());
+    let group_id = SessionGroupId::new();
+    let session = core.create_session(group_id);
     let engine = TurnEngine::new(core.registry(), session.operations.clone(), workdir);
     let request = TurnRequest::new(
-        ProjectId::new(),
-        SessionGroupId::new(),
+        ProjectId::from_workdir(directory.path()),
+        group_id,
         session.operations.session_id(),
         provider_id,
         "fake-model",

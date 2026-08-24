@@ -86,8 +86,8 @@ impl Core {
     }
     pub fn create_session(&self, group_id: SessionGroupId) -> SessionHandle {
         match self.registry.session_store() {
-            Some(store) => new_session_with_store(SessionId::new(), group_id, store),
-            None => new_session(SessionId::new(), group_id),
+            Some(store) => new_session_with_store(SessionId::new(group_id), group_id, store),
+            None => new_session(SessionId::new(group_id), group_id),
         }
     }
     pub fn open_session(&self, state: SessionState) -> SessionHandle {
@@ -121,7 +121,7 @@ impl Core {
 
 pub fn project_from_path(root: PathBuf) -> super::models::Project {
     super::models::Project {
-        id: ProjectId::new(),
+        id: ProjectId::from_workdir(&root),
         name: root
             .file_name()
             .and_then(|name| name.to_str())

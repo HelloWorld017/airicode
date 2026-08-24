@@ -16,8 +16,7 @@ pub mod tool_webfetch;
 pub use fake_provider::{FakeProvider, FakeProviderPlugin};
 pub use instruction_base::{InstructionBasePlugin, DEFAULT_BASE_INSTRUCTION};
 pub use persistence::{
-    default_data_root, project_hash, JsonlSessionStore, JsonlStore, PersistencePlugin,
-    SessionLogRecord,
+    default_data_root, JsonlSessionStore, JsonlStore, PersistencePlugin, SessionLogRecord,
 };
 pub use provider_openai::{
     OpenAIProvider, OpenAIProviderPlugin, OpenAiProvider, OpenAiProviderPlugin, ProviderOpenAI,

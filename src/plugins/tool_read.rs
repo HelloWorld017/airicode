@@ -125,10 +125,10 @@ pub struct ToolReadPlugin {
     tool: Arc<ToolRead>,
 }
 impl ToolReadPlugin {
-    pub fn new(tool: Arc<ToolRead>) -> Self {
+    pub fn new() -> Self {
         Self {
             id: PluginId::new(),
-            tool,
+            tool: Arc::new(ToolRead::new()),
         }
     }
     pub fn tool(&self) -> Arc<ToolRead> {
