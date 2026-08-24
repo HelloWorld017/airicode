@@ -1,0 +1,152 @@
+use std::sync::Arc;
+
+use airicode::core::{
+    models::{
+        ContextPriority, ContextSource, Message, Role, SessionGroupId, SessionId, SessionMutation,
+        SessionState, ToolDefinition, ToolId, ToolOutput,
+    },
+    operations::new_session,
+    registry::Registry,
+    Tool,
+};
+use async_trait::async_trait;
+use serde_json::json;
+
+#[test]
+fn reducer_replays_atomic_conversation_and_invalidation() -> airicode::Result<()> {
+    let session_id = SessionId::new();
+    let group_id = SessionGroupId::new();
+    let message = Message::text(Role::User, "hello", None);
+    let part = airicode::core::models::ContextPart {
+        id: airicode::core::models::ContextPartId::new(),
+        priority: ContextPriority::High,
+        source: ContextSource::Message(message.id),
+        metadata: Default::default(),
+        invalidated: false,
+    };
+    let first = airicode::core::models::SessionCommit::new(
+        1,
+        vec![
+            SessionMutation::MessageAdded {
+                message: message.clone(),
+            },
+            SessionMutation::ContextPartAdded { part: part.clone() },
+        ],
+    );
+    let second = airicode::core::models::SessionCommit::new(
+        2,
+        vec![SessionMutation::MessageInvalidated {
+            message_id: message.id,
+        }],
+    );
+    let encoded = serde_json::to_vec(&(first.clone(), second.clone()))?;
+    let (decoded_first, decoded_second): (
+        airicode::core::models::SessionCommit,
+        airicode::core::models::SessionCommit,
+    ) = serde_json::from_slice(&encoded)?;
+    let mut state = SessionState::new(session_id, group_id);
+    state.apply(&decoded_first)?;
+    state.apply(&decoded_second)?;
+    assert!(state.visible_messages().is_empty());
+    assert_eq!(state.active_context().len(), 1);
+    assert_eq!(state.last_sequence, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn actor_commits_message_and_context_as_one_operation() -> airicode::Result<()> {
+    let session = new_session(SessionId::new(), SessionGroupId::new());
+    let message = Message::text(Role::User, "atomic", None);
+    let (message_id, context_id) = session
+        .operations
+        .add_conversation_message(message, ContextPriority::High)
+        .await?;
+    let state = session.operations.snapshot().await?;
+    assert!(state.messages.contains_key(&message_id));
+    assert!(state.context.contains_key(&context_id));
+    assert_eq!(state.last_sequence, 1);
+    Ok(())
+}
+
+struct TestTool {
+    id: ToolId,
+    name: &'static str,
+}
+
+#[async_trait]
+impl Tool for TestTool {
+    fn id(&self) -> ToolId {
+        self.id
+    }
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name.into(),
+            description: "test".into(),
+            input_schema: json!({ "type": "object" }),
+        }
+    }
+    async fn execute(
+        &self,
+        _input: serde_json::Value,
+        _context: airicode::core::models::ToolContext,
+    ) -> airicode::Result<ToolOutput> {
+        Ok(ToolOutput::Success {
+            content: "ok".into(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn registry_snapshots_tools_and_supports_dynamic_removal() -> airicode::Result<()> {
+    let registry = Registry::new();
+    let registry_scope = registry.scope(airicode::core::models::PluginId::new());
+    let first = Arc::new(TestTool {
+        id: ToolId::new(),
+        name: "first",
+    });
+    let second = Arc::new(TestTool {
+        id: ToolId::new(),
+        name: "second",
+    });
+    let first_handle = registry_scope.register_tool(first, 0)?;
+    let second_handle = registry_scope.register_tool(second, 10)?;
+    assert_eq!(registry.tools().len(), 2);
+    assert_eq!(registry.tools()[0].definition().name, "second");
+    second_handle.remove().await?;
+    assert_eq!(registry.tools().len(), 1);
+    first_handle.remove().await?;
+    assert!(registry.tools().is_empty());
+    Ok(())
+}
+
+#[test]
+fn reducer_rejects_sequence_gaps() {
+    let mut state = SessionState::new(SessionId::new(), SessionGroupId::new());
+    let commit = airicode::core::models::SessionCommit::new(
+        2,
+        vec![SessionMutation::DurableUIStateUpdated {
+            state: Default::default(),
+        }],
+    );
+    assert!(state.apply(&commit).is_err());
+}
+
+#[test]
+fn reducer_does_not_apply_a_partial_invalid_commit() {
+    let mut state = SessionState::new(SessionId::new(), SessionGroupId::new());
+    let message = Message::text(Role::User, "must not persist", None);
+    let commit = airicode::core::models::SessionCommit::new(
+        1,
+        vec![
+            SessionMutation::MessageAdded {
+                message: message.clone(),
+            },
+            SessionMutation::ContextPartInvalidated {
+                context_part_id: airicode::core::models::ContextPartId::new(),
+            },
+        ],
+    );
+    assert!(state.apply(&commit).is_err());
+    assert!(state.messages.is_empty());
+    assert_eq!(state.last_sequence, 0);
+}

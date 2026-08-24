@@ -12,6 +12,7 @@ dependencies = [
  "crossterm",
  "futures-core",
  "futures-util",
+ "libc",
  "ratatui",
  "reqwest",
  "serde",
