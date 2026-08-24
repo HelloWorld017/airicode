@@ -47,6 +47,7 @@ id_type!(ToolCallId);
 id_type!(ProviderId);
 id_type!(PluginId);
 id_type!(CommandId);
+id_type!(ShellActionId);
 id_type!(WorkdirLayerId);
 id_type!(CommitId);
 id_type!(RegistrationId);

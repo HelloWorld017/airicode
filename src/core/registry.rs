@@ -7,8 +7,8 @@ use super::{
     error::{Error, Result},
     hooks::RegisterHook,
     models::{
-        Command, CommandId, PluginId, Provider, ProviderId, RegistrationId, Tool, ToolId,
-        WorkdirLayerId,
+        Command, CommandId, PluginId, Provider, ProviderId, RegistrationId, ShellAction,
+        ShellActionId, Tool, ToolId, WorkdirLayerId,
     },
     workdir::WorkdirLayer,
 };
@@ -29,6 +29,7 @@ struct RegistryState {
     providers: HashMap<ProviderId, Registered<dyn Provider>>,
     tools: HashMap<ToolId, Registered<dyn Tool>>,
     commands: HashMap<CommandId, Registered<dyn Command>>,
+    shell_actions: HashMap<ShellActionId, Registered<dyn ShellAction>>,
     workdir_layers: HashMap<WorkdirLayerId, Registered<dyn WorkdirLayer>>,
 }
 
@@ -45,6 +46,7 @@ enum RegistrationKind {
     Provider(ProviderId),
     Tool(ToolId),
     Command(CommandId),
+    ShellAction(ShellActionId),
     WorkdirLayer(WorkdirLayerId),
 }
 
@@ -75,6 +77,7 @@ impl Registry {
                     providers: HashMap::new(),
                     tools: HashMap::new(),
                     commands: HashMap::new(),
+                    shell_actions: HashMap::new(),
                     workdir_layers: HashMap::new(),
                 }),
                 hooks: RwLock::new(super::hooks::HookRegistry::default()),
@@ -178,6 +181,51 @@ impl Registry {
         values.into_iter().map(|entry| entry.value).collect()
     }
 
+    pub fn shell_action(&self, id: ShellActionId) -> Option<Arc<dyn ShellAction>> {
+        self.inner
+            .state
+            .read()
+            .ok()?
+            .shell_actions
+            .get(&id)
+            .map(|entry| entry.value.clone())
+    }
+
+    pub fn shell_action_by_name(&self, name: &str) -> Option<Arc<dyn ShellAction>> {
+        let actions = self
+            .inner
+            .state
+            .read()
+            .ok()?
+            .shell_actions
+            .values()
+            .map(|entry| entry.value.clone())
+            .collect::<Vec<_>>();
+        actions
+            .into_iter()
+            .find(|action| action.definition().name == name)
+    }
+
+    pub fn shell_actions(&self) -> Vec<Arc<dyn ShellAction>> {
+        let mut values = self
+            .inner
+            .state
+            .read()
+            .expect("registry poisoned")
+            .shell_actions
+            .values()
+            .map(|entry| Registered {
+                value: entry.value.clone(),
+                owner: entry.owner,
+                priority: entry.priority,
+                order: entry.order,
+                registration_id: entry.registration_id,
+            })
+            .collect::<Vec<_>>();
+        values.sort_by_key(|entry| (-entry.priority, entry.order));
+        values.into_iter().map(|entry| entry.value).collect()
+    }
+
     pub fn workdir_layers(&self) -> Vec<Arc<dyn WorkdirLayer>> {
         let mut values = self
             .inner
@@ -248,6 +296,13 @@ impl Registry {
                     .is_some_and(|entry| entry.registration_id == registration_id)
                     && state.commands.remove(&id).is_some()
             }
+            RegistrationKind::ShellAction(id) => {
+                state
+                    .shell_actions
+                    .get(&id)
+                    .is_some_and(|entry| entry.registration_id == registration_id)
+                    && state.shell_actions.remove(&id).is_some()
+            }
             RegistrationKind::WorkdirLayer(id) => {
                 state
                     .workdir_layers
@@ -274,6 +329,7 @@ impl Registry {
         state.providers.retain(|_, value| value.owner != owner);
         state.tools.retain(|_, value| value.owner != owner);
         state.commands.retain(|_, value| value.owner != owner);
+        state.shell_actions.retain(|_, value| value.owner != owner);
         state.workdir_layers.retain(|_, value| value.owner != owner);
         state.revision += 1;
         Ok(())
@@ -406,6 +462,53 @@ impl PluginRegistryScope {
         Ok(RegistrationHandle {
             registry: self.registry.clone(),
             kind: RegistrationKind::Command(id),
+            registration_id,
+        })
+    }
+
+    pub fn register_shell_action(
+        &self,
+        action: Arc<dyn ShellAction>,
+        priority: i32,
+    ) -> Result<RegistrationHandle> {
+        let definition = action.definition();
+        let id = action.id();
+        let mut state = self
+            .registry
+            .inner
+            .state
+            .write()
+            .map_err(|_| Error::Registry("registry poisoned".into()))?;
+        if state.shell_actions.contains_key(&id) {
+            return Err(Error::Registry(format!("duplicate shell action {id}")));
+        }
+        if state
+            .shell_actions
+            .values()
+            .any(|entry| entry.value.definition().name == definition.name)
+        {
+            return Err(Error::Registry(format!(
+                "duplicate shell action name {}",
+                definition.name
+            )));
+        }
+        state.order += 1;
+        let registration_id = RegistrationId::new();
+        let order = state.order;
+        state.shell_actions.insert(
+            id,
+            Registered {
+                value: action,
+                owner: self.owner,
+                priority,
+                order,
+                registration_id,
+            },
+        );
+        state.revision += 1;
+        Ok(RegistrationHandle {
+            registry: self.registry.clone(),
+            kind: RegistrationKind::ShellAction(id),
             registration_id,
         })
     }

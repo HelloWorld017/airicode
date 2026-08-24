@@ -3,7 +3,8 @@ use std::sync::Arc;
 use airicode::core::{
     models::{
         ContextPriority, ContextSource, Message, Role, SessionGroupId, SessionId, SessionMutation,
-        SessionState, ToolDefinition, ToolId, ToolOutput,
+        SessionState, ShellAction, ShellActionContext, ShellActionDefinition, ShellActionId,
+        ShellActionInput, ToolDefinition, ToolId, ToolOutput,
     },
     operations::new_session,
     registry::Registry,
@@ -11,6 +12,7 @@ use airicode::core::{
 };
 use async_trait::async_trait;
 use serde_json::json;
+use std::path::PathBuf;
 
 #[test]
 fn reducer_replays_atomic_conversation_and_invalidation() -> airicode::Result<()> {
@@ -163,6 +165,73 @@ async fn registry_snapshots_tools_and_supports_dynamic_removal() -> airicode::Re
     assert_eq!(registry.tools().len(), 1);
     first_handle.remove().await?;
     assert!(registry.tools().is_empty());
+    Ok(())
+}
+
+struct TestShellAction {
+    id: ShellActionId,
+    name: &'static str,
+}
+
+#[async_trait]
+impl ShellAction for TestShellAction {
+    fn id(&self) -> ShellActionId {
+        self.id
+    }
+
+    fn definition(&self) -> ShellActionDefinition {
+        ShellActionDefinition::new(
+            self.name,
+            "test shell action",
+            json!({ "arguments": { "type": "string", "remainder": true } }),
+        )
+    }
+
+    async fn execute(
+        &self,
+        input: ShellActionInput,
+        _context: ShellActionContext,
+    ) -> airicode::Result<String> {
+        Ok(input.arguments.join("/"))
+    }
+}
+
+#[tokio::test]
+async fn registry_registers_and_dispatches_shell_actions() -> airicode::Result<()> {
+    let registry = Registry::new();
+    let scope = registry.scope(airicode::core::models::PluginId::new());
+    let action = Arc::new(TestShellAction {
+        id: ShellActionId::new(),
+        name: "inspect",
+    });
+    let handle = scope.register_shell_action(action, 10)?;
+    assert_eq!(registry.shell_actions().len(), 1);
+    assert_eq!(
+        registry
+            .shell_action_by_name("inspect")
+            .expect("registered action")
+            .definition()
+            .scheme,
+        json!({ "arguments": { "type": "string", "remainder": true } })
+    );
+
+    let directory = tempfile::tempdir()?;
+    let result = airicode::core::ShellActionHandler::new(registry.clone())
+        .handle_args(
+            ["inspect", "one", "two"],
+            ShellActionContext {
+                project_id: airicode::core::models::ProjectId::new(),
+                workdir: Arc::new(airicode::core::workdir::NativeWorkdir::new(PathBuf::from(
+                    directory.path(),
+                ))?),
+                cancellation: tokio_util::sync::CancellationToken::new(),
+            },
+        )
+        .await?;
+    assert_eq!(result, "one/two");
+
+    handle.remove().await?;
+    assert!(registry.shell_action_by_name("inspect").is_none());
     Ok(())
 }
 

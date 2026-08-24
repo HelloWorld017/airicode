@@ -8,6 +8,7 @@ pub mod operations;
 pub mod registry;
 pub mod runtime;
 pub mod session;
+pub mod shell;
 pub mod workdir;
 
 pub use core::{Core, CoreBuilder};
@@ -20,3 +21,4 @@ pub use models::*;
 pub use operations::{Operations, SessionHandle};
 pub use registry::{PluginRegistryScope, RegistrationHandle, Registry};
 pub use runtime::{TurnEngine, TurnRequest};
+pub use shell::ShellActionHandler;

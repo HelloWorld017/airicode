@@ -8,6 +8,7 @@ use super::{
     models::{Plugin, ProjectId, SessionGroupId, SessionId, SessionState},
     operations::{new_session, SessionHandle},
     registry::Registry,
+    shell::ShellActionHandler,
 };
 
 pub struct CoreBuilder {
@@ -70,6 +71,9 @@ impl Core {
     }
     pub fn registry(&self) -> Registry {
         self.registry.clone()
+    }
+    pub fn shell_action_handler(&self) -> ShellActionHandler {
+        ShellActionHandler::new(self.registry())
     }
     pub fn create_session(&self, group_id: SessionGroupId) -> SessionHandle {
         new_session(SessionId::new(), group_id)
