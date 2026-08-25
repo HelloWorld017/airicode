@@ -7,7 +7,8 @@ use crate::{
     core::{
         error::{Error, Result},
         models::{
-            NoteContent, Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId, ToolOutput,
+            NoteContent, Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId, ToolInput,
+            ToolInputDefinition, ToolOutput,
         },
         registry::PluginRegistryScope,
     },
@@ -80,15 +81,15 @@ impl Tool for ToolPatch {
         ToolDefinition {
             name: "patch".into(),
             description: r#"Apply a raw diff-like patch to root-relative workdir files. Headers are `ADD path`, `DEL path`, or `EDIT path`; an EDIT may use `EDIT path@@<line>` to disambiguate a repeated match. In an EDIT body, context lines use ` <hash>|`, deleted lines use `-<hash>|`, and new lines use `+<text>`; hashes must be copied from read output (the part after `<line>:` and before `|`). Context is preserved, deletion lines are removed, and additions are inserted. The complete sequence of context/deletion hashes must match the current file exactly once. An edit must include up to three available unchanged hashline context lines before and after its changed lines; `@@<line>` does not bypass this requirement. A stale match fails, and multiple matches fail unless `@@<line>` identifies the starting line. ADD accepts only `+` lines and DEL has no body."#.into(),
-            input_schema: crate::utils::schema::json_schema::<String>(),
+            input: ToolInputDefinition::Text,
         }
     }
 
-    async fn execute(&self, input: Value, context: ToolContext) -> Result<ToolOutput> {
-        let text = input
-            .as_str()
-            .ok_or_else(|| Error::Tool("patch input must be text".into()))?;
-        let operations = match parse_patch(text) {
+    async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {
+        let ToolInput::Text(text) = input else {
+            return Err(Error::Tool("patch input must be text".into()));
+        };
+        let operations = match parse_patch(&text) {
             Ok(operations) => operations,
             Err(message) => return Ok(ToolOutput::Failure { content: message }),
         };

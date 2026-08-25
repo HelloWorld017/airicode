@@ -4,7 +4,8 @@ use airicode::core::{
     models::{
         ContextPriority, ContextSource, Message, MessagePart, Role, SessionGroupId, SessionId,
         SessionMutation, SessionState, ShellAction, ShellActionContext, ShellActionDefinition,
-        ShellActionId, ShellActionInput, ToolDefinition, ToolId, ToolOutput,
+        ShellActionId, ShellActionInput, ToolDefinition, ToolId, ToolInput, ToolInputDefinition,
+        ToolOutput,
     },
     operations::new_session,
     registry::Registry,
@@ -132,12 +133,12 @@ impl Tool for TestTool {
         ToolDefinition {
             name: self.name.into(),
             description: "test".into(),
-            input_schema: json!({ "type": "object" }),
+            input: ToolInputDefinition::JsonSchema(json!({ "type": "object" })),
         }
     }
     async fn execute(
         &self,
-        _input: serde_json::Value,
+        _input: ToolInput,
         _context: airicode::core::models::ToolContext,
     ) -> airicode::Result<ToolOutput> {
         Ok(ToolOutput::Success {

@@ -6,7 +6,10 @@ use serde_json::{json, Value};
 
 use crate::core::{
     error::{Error, Result},
-    models::{Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId, ToolOutput},
+    models::{
+        Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId, ToolInput,
+        ToolInputDefinition, ToolOutput,
+    },
     registry::PluginRegistryScope,
 };
 
@@ -40,11 +43,16 @@ impl Tool for ToolQuestion {
         ToolDefinition {
             name: "question".into(),
             description: "Ask the user for information that the agent cannot safely infer. Provide the question and optional string choices. The question is stored as pending UI/plugin state and this tool returns Stop, ending the current provider turn without cancellation; the user's next response starts a normal new turn.".into(),
-            input_schema: crate::utils::schema::json_schema::<QuestionInputSchema>(),
+            input: ToolInputDefinition::JsonSchema(
+                crate::utils::schema::json_schema::<QuestionInputSchema>(),
+            ),
         }
     }
 
-    async fn execute(&self, input: Value, context: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {
+        let ToolInput::Json(input) = input else {
+            return Err(Error::Tool("question input must be an object".into()));
+        };
         let question = input
             .get("question")
             .and_then(Value::as_str)

@@ -4,7 +4,7 @@ use airicode::{
     core::{
         models::{
             ContextPriority, Message, MessagePart, ProviderId, Role, SessionGroupId, SessionId,
-            ToolContext, ToolOutput,
+            ToolContext, ToolInput, ToolOutput,
         },
         operations::new_session,
         persistence::SessionStore,
@@ -147,7 +147,7 @@ async fn patch_revalidates_hashline_and_stores_full_diff_as_note() -> Result<()>
     let patch = ToolPatch::new();
     let first = patch
         .execute(
-            json!(format!(
+            ToolInput::Text(format!(
                 "EDIT main.rs\n {}|\n-{}|\n+TWO\n {}|",
                 tags[0].tag, tags[1].tag, tags[2].tag
             )),
@@ -164,7 +164,7 @@ async fn patch_revalidates_hashline_and_stores_full_diff_as_note() -> Result<()>
     assert_eq!(session.operations.snapshot().await?.notes.len(), 1);
     let stale = patch
         .execute(
-            json!(format!(
+            ToolInput::Text(format!(
                 "EDIT main.rs\n {}|\n-{}|\n+again\n {}|",
                 tags[0].tag, tags[1].tag, tags[2].tag
             )),
@@ -194,7 +194,9 @@ async fn patch_supports_add_delete_and_ambiguous_hashline_hints() -> Result<()> 
     assert!(matches!(
         patch
             .execute(
-                json!("ADD src/hi.txt\n+hi\n+how are you\n+i'm fine thank you and you"),
+                ToolInput::Text(
+                    "ADD src/hi.txt\n+hi\n+how are you\n+i'm fine thank you and you".into()
+                ),
                 context.clone()
             )
             .await?,
@@ -223,14 +225,14 @@ async fn patch_supports_add_delete_and_ambiguous_hashline_hints() -> Result<()> 
     );
     let ambiguous = patch
         .execute(
-            json!(format!("EDIT repeated.txt\n{repeated_body}")),
+            ToolInput::Text(format!("EDIT repeated.txt\n{repeated_body}")),
             context.clone(),
         )
         .await?;
     assert!(matches!(ambiguous, ToolOutput::Failure { content } if content.contains("ambiguous")));
     patch
         .execute(
-            json!(format!("EDIT repeated.txt@@8\n{repeated_body}")),
+            ToolInput::Text(format!("EDIT repeated.txt@@8\n{repeated_body}")),
             context.clone(),
         )
         .await?;
@@ -239,7 +241,12 @@ async fn patch_supports_add_delete_and_ambiguous_hashline_hints() -> Result<()> 
         b"before one\nbefore two\nbefore three\nsame\nafter one\nafter two\nafter three\nbefore one\nbefore two\nbefore three\nchanged\nafter one\nafter two\nafter three\n"
     );
 
-    patch.execute(json!("DEL src/hi.txt"), context).await?;
+    patch
+        .execute(
+            airicode::core::models::ToolInput::Text("DEL src/hi.txt".into()),
+            context,
+        )
+        .await?;
     assert!(workdir.read(Path::new("src/hi.txt")).await.is_err());
     Ok(())
 }
@@ -266,7 +273,7 @@ async fn patch_rejects_insufficient_context_even_with_line_hint() -> Result<()> 
     let target_tag = hashline::tag("three");
     let insufficient = patch
         .execute(
-            json!(format!("EDIT context.txt@@3\n-{target_tag}|\n+THREE")),
+            ToolInput::Text(format!("EDIT context.txt@@3\n-{target_tag}|\n+THREE")),
             context.clone(),
         )
         .await?;
@@ -284,7 +291,7 @@ async fn patch_rejects_insufficient_context_even_with_line_hint() -> Result<()> 
     let short = hashline::render("one\ntwo\nthree\n");
     let accepted = patch
         .execute(
-            json!(format!(
+            ToolInput::Text(format!(
                 "EDIT short.txt@@1\n {}|\n-{}|\n+TWO\n {}|",
                 short[0].tag, short[1].tag, short[2].tag
             )),

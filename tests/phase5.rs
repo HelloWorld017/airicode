@@ -4,7 +4,7 @@ use airicode::{
     core::{
         models::{
             MessagePart, ProjectId, ProviderEvent, ProviderId, Role, RuntimeEvent, SessionGroupId,
-            ToolContext, ToolOutput, TurnId,
+            ToolContext, ToolInput, ToolOutput, TurnId,
         },
         operations::new_session,
         runtime::{TurnEngine, TurnRequest},
@@ -65,7 +65,10 @@ async fn read_and_shell_tools_use_the_shared_workdir_contract() -> Result<()> {
 
     let read = ToolRead::new();
     let output = read
-        .execute(json!({ "path": "main.rs" }), context.clone())
+        .execute(
+            ToolInput::Json(json!({ "path": "main.rs" })),
+            context.clone(),
+        )
         .await?;
     let ToolOutput::Success { content } = output else {
         panic!("read failed")
@@ -74,8 +77,13 @@ async fn read_and_shell_tools_use_the_shared_workdir_contract() -> Result<()> {
     assert!(content.contains("|fn main() {}"));
 
     let shell = ToolShell::new();
-    assert_eq!(shell.definition().input_schema["type"], "string");
-    let output = shell.execute(json!("printf shell-output"), context).await?;
+    assert!(matches!(
+        shell.definition().input,
+        airicode::core::models::ToolInputDefinition::Text
+    ));
+    let output = shell
+        .execute(ToolInput::Text("printf shell-output".into()), context)
+        .await?;
     let ToolOutput::Success { content } = output else {
         panic!("shell failed")
     };
@@ -191,6 +199,88 @@ async fn fake_provider_completes_a_read_tool_turn_on_a_real_project() -> Result<
     assert!(state.visible_messages().iter().any(|message| {
         message.content.iter().any(|part| matches!(part.content.as_ref(), Some(airicode::core::models::MessagePartContent::Text { text }) if text.contains("The file says")))
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn fake_provider_executes_custom_shell_input_after_streaming_done() -> Result<()> {
+    let directory = tempdir()?;
+    let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
+    let provider_id = ProviderId::new();
+    let provider = Arc::new(FakeProvider::new(
+        provider_id,
+        [
+            vec![
+                ProviderEvent::CustomToolCallInputDelta {
+                    index: 0,
+                    id: Some("call-shell".into()),
+                    name: Some("shell".into()),
+                    input: "printf custom-".into(),
+                },
+                ProviderEvent::CustomToolCallInputDelta {
+                    index: 0,
+                    id: None,
+                    name: None,
+                    input: "output".into(),
+                },
+                ProviderEvent::CustomToolCallInputDone {
+                    index: 0,
+                    input: "printf custom-output".into(),
+                },
+                ProviderEvent::Finished {
+                    reason: airicode::core::models::FinishReason::ToolCalls,
+                },
+            ],
+            vec![
+                ProviderEvent::OutputPart {
+                    index: 0,
+                    part: MessagePart::text("The command completed."),
+                },
+                ProviderEvent::Finished {
+                    reason: airicode::core::models::FinishReason::Stop,
+                },
+            ],
+        ],
+    ));
+    let fake_plugin = Arc::new(FakeProviderPlugin::new(provider));
+    let core = airicode::core::CoreBuilder::new()
+        .plugin(fake_plugin)
+        .plugin(Arc::new(ToolShellPlugin::new()))
+        .build()
+        .await?;
+    let group_id = SessionGroupId::new();
+    let session = core.create_session(group_id);
+    let mut events = session.subscribe();
+    let engine = TurnEngine::new(core.registry(), session.operations.clone(), workdir);
+    let request = TurnRequest::new(
+        ProjectId::from_workdir(directory.path()),
+        group_id,
+        session.operations.session_id(),
+        provider_id,
+        "fake-model",
+        "build",
+        "run the command",
+    );
+    engine.run(request).await?;
+
+    let state = session.operations.snapshot().await?;
+    assert!(state.visible_messages().iter().any(|message| {
+        message.content.iter().any(|part| {
+            matches!(
+                part.content.as_ref(),
+                Some(airicode::core::models::MessagePartContent::ToolResult {
+                    result: ToolOutput::Success { content }, ..
+                }) if content.contains("custom-output")
+            )
+        })
+    }));
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(
+            event,
+            RuntimeEvent::ToolInputDelta { name, input, .. }
+                if name == "shell" && input == "printf custom-"
+        ))
+    );
     Ok(())
 }
 

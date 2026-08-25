@@ -7,7 +7,10 @@ use serde_json::Value;
 
 use crate::core::{
     error::{Error, Result},
-    models::{Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId, ToolOutput},
+    models::{
+        Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId, ToolInput,
+        ToolInputDefinition, ToolOutput,
+    },
     registry::PluginRegistryScope,
 };
 
@@ -55,11 +58,16 @@ impl Tool for ToolTodo {
         ToolDefinition {
             name: "todo".into(),
             description: "Replace the durable session todo list with the complete array supplied in `todos`; send the full desired state rather than a delta. Each item needs `content` and may use `pending`, `in_progress`, `completed`, or `cancelled` status plus a priority. The updated list is stored in the todo plugin namespace and a short count is returned.".into(),
-            input_schema: crate::utils::schema::json_schema::<TodoInputSchema>(),
+            input: ToolInputDefinition::JsonSchema(
+                crate::utils::schema::json_schema::<TodoInputSchema>(),
+            ),
         }
     }
 
-    async fn execute(&self, input: Value, context: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {
+        let ToolInput::Json(input) = input else {
+            return Err(Error::Tool("todo input must be an object".into()));
+        };
         let todos = input
             .get("todos")
             .and_then(Value::as_array)

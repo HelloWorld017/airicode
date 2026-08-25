@@ -12,6 +12,11 @@ pub enum RuntimeEvent {
         text: String,
         reasoning: bool,
     },
+    ToolInputDelta {
+        turn_id: TurnId,
+        name: String,
+        input: String,
+    },
     ProviderUsageUpdated {
         turn_id: TurnId,
         usage: Usage,

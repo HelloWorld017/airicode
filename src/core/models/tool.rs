@@ -27,10 +27,22 @@ impl ToolOutput {
     }
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
+pub enum ToolInputDefinition {
+    JsonSchema(Value),
+    Text,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ToolInput {
+    Json(Value),
+    Text(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
-    pub input_schema: Value,
+    pub input: ToolInputDefinition,
 }
 
 #[derive(Clone)]
@@ -48,5 +60,5 @@ pub struct ToolContext {
 pub trait Tool: Send + Sync {
     fn id(&self) -> ToolId;
     fn definition(&self) -> ToolDefinition;
-    async fn execute(&self, input: Value, context: ToolContext) -> Result<ToolOutput>;
+    async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput>;
 }

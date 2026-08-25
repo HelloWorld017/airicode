@@ -1,15 +1,14 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use serde_json::Value;
-
 use crate::core::{
     error::{Error, Result},
     models::{
-        CommandSpec, Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId, ToolOutput,
+        CommandSpec, Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId, ToolInput,
+        ToolInputDefinition, ToolOutput,
     },
     registry::PluginRegistryScope,
 };
+use async_trait::async_trait;
 
 pub struct ToolShell {
     id: ToolId,
@@ -42,17 +41,17 @@ impl Tool for ToolShell {
         ToolDefinition {
             name: "shell".into(),
             description: "Execute raw shell command text in the current workdir. Pass a string, not a JSON object. The command runs through the Workdir abstraction so its root, worktree, and sandbox layers are respected. The result includes the exit status and captured stdout/stderr; a non-zero exit status is a tool failure, and cancellation stops the process when supported.".into(),
-            input_schema: crate::utils::schema::json_schema::<String>(),
+            input: ToolInputDefinition::Text,
         }
     }
-    async fn execute(&self, input: Value, context: ToolContext) -> Result<ToolOutput> {
-        let command = input
-            .as_str()
-            .ok_or_else(|| Error::Tool("shell input must be text".into()))?;
+    async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {
+        let ToolInput::Text(command) = input else {
+            return Err(Error::Tool("shell input must be text".into()));
+        };
         #[cfg(windows)]
         let spec = CommandSpec {
             program: "cmd".into(),
-            args: vec!["/C".into(), command.into()],
+            args: vec!["/C".into(), command],
             cwd: None,
             env: Default::default(),
             max_output_bytes: self.max_output_bytes,
@@ -60,7 +59,7 @@ impl Tool for ToolShell {
         #[cfg(not(windows))]
         let spec = CommandSpec {
             program: "sh".into(),
-            args: vec!["-c".into(), command.into()],
+            args: vec!["-c".into(), command],
             cwd: None,
             env: Default::default(),
             max_output_bytes: self.max_output_bytes,

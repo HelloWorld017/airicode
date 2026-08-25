@@ -8,7 +8,10 @@ use serde_json::Value;
 
 use crate::core::{
     error::{Error, Result},
-    models::{Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId, ToolOutput},
+    models::{
+        Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId, ToolInput,
+        ToolInputDefinition, ToolOutput,
+    },
     registry::PluginRegistryScope,
 };
 
@@ -55,11 +58,16 @@ impl Tool for ToolWebfetch {
         ToolDefinition {
             name: "webfetch".into(),
             description: "Fetch an HTTP or HTTPS URL and return a normalized response containing the status and body text. Requests have a timeout and maximum response size, support cancellation, and do not modify the workdir. Non-success HTTP statuses and network/limit failures are returned as tool failures.".into(),
-            input_schema: crate::utils::schema::json_schema::<WebfetchInputSchema>(),
+            input: ToolInputDefinition::JsonSchema(
+                crate::utils::schema::json_schema::<WebfetchInputSchema>(),
+            ),
         }
     }
 
-    async fn execute(&self, input: Value, context: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {
+        let ToolInput::Json(input) = input else {
+            return Err(Error::Tool("webfetch input must be an object".into()));
+        };
         let url = input
             .get("url")
             .and_then(Value::as_str)

@@ -16,7 +16,7 @@ use crate::core::{
     models::{
         FinishReason, Message, MessagePart, MessagePartContent, Model, ModelCapabilities, Plugin,
         PluginId, Provider, ProviderEvent, ProviderId, ProviderRequest, ProviderStream, Role,
-        ToolCallId, Usage,
+        ToolCallId, ToolInputDefinition, Usage,
     },
     registry::PluginRegistryScope,
 };
@@ -34,7 +34,7 @@ impl OpenAiProvider {
         Self {
             id,
             api_key: Arc::new(RwLock::new(api_key.into())),
-            base_url: Arc::new(RwLock::new("https://api.openai.com/v1".into())),
+            base_url: Arc::new(RwLock::new("https://openrouter.ai/api/v1".into())),
             client: Client::new(),
         }
     }
@@ -146,7 +146,7 @@ impl Provider for OpenAiProvider {
         let stream = try_stream! {
             let mut buffer = Vec::new();
             let mut output_items = BTreeMap::new();
-            let mut saw_function_call = false;
+            let mut saw_tool_call = false;
             let mut done = false;
             while !done {
                 let chunk = tokio::select! {
@@ -184,7 +184,7 @@ impl Provider for OpenAiProvider {
                         event,
                         provider_id,
                         &mut output_items,
-                        &mut saw_function_call,
+                        &mut saw_tool_call,
                     )? {
                         yield event;
                     }
@@ -198,13 +198,8 @@ impl Provider for OpenAiProvider {
 fn responses_body(request: &ProviderRequest, provider_id: ProviderId) -> Value {
     json!({
         "model": request.model,
-        "input": responses_input(&request.messages, provider_id),
-        "tools": request.tools.iter().map(|tool| json!({
-            "type": "function",
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": tool.input_schema,
-        })).collect::<Vec<_>>(),
+        "input": responses_input(&request.messages, provider_id, &request.tools),
+        "tools": request.tools.iter().map(responses_tool).collect::<Vec<_>>(),
         "stream": true,
         "store": false,
         "include": ["reasoning.encrypted_content"],
@@ -212,7 +207,27 @@ fn responses_body(request: &ProviderRequest, provider_id: ProviderId) -> Value {
     })
 }
 
-fn responses_input(messages: &[std::sync::Arc<Message>], provider_id: ProviderId) -> Vec<Value> {
+fn responses_tool(tool: &crate::core::models::ToolDefinition) -> Value {
+    match &tool.input {
+        ToolInputDefinition::JsonSchema(schema) => json!({
+            "type": "function",
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": schema,
+        }),
+        ToolInputDefinition::Text => json!({
+            "type": "custom",
+            "name": tool.name,
+            "description": tool.description,
+        }),
+    }
+}
+
+fn responses_input(
+    messages: &[std::sync::Arc<Message>],
+    provider_id: ProviderId,
+    tools: &[crate::core::models::ToolDefinition],
+) -> Vec<Value> {
     let mut input = Vec::new();
     for message in messages {
         for part in &message.content {
@@ -236,12 +251,26 @@ fn responses_input(messages: &[std::sync::Arc<Message>], provider_id: ProviderId
                     id,
                     name,
                     arguments,
-                } => input.push(json!({
-                    "type": "function_call",
-                    "call_id": id.to_string(),
-                    "name": name,
-                    "arguments": response_arguments(arguments),
-                })),
+                } => {
+                    let text_input = tools.iter().any(|tool| {
+                        tool.name == *name && matches!(tool.input, ToolInputDefinition::Text)
+                    });
+                    if text_input {
+                        input.push(json!({
+                            "type": "custom_tool_call",
+                            "call_id": id.to_string(),
+                            "name": name,
+                            "input": response_text_input(arguments),
+                        }));
+                    } else {
+                        input.push(json!({
+                            "type": "function_call",
+                            "call_id": id.to_string(),
+                            "name": name,
+                            "arguments": response_function_arguments(arguments),
+                        }));
+                    }
+                }
                 MessagePartContent::ToolResult {
                     call_id, result, ..
                 } => input.push(json!({
@@ -265,18 +294,22 @@ fn response_role(role: Role) -> &'static str {
     }
 }
 
-fn response_arguments(arguments: &Value) -> String {
+fn response_text_input(arguments: &Value) -> String {
     match arguments {
         Value::String(arguments) => arguments.clone(),
         arguments => arguments.to_string(),
     }
 }
 
+fn response_function_arguments(arguments: &Value) -> String {
+    serde_json::to_string(arguments).unwrap_or_else(|_| arguments.to_string())
+}
+
 fn response_events(
     event: Value,
     provider_id: ProviderId,
     output_items: &mut BTreeMap<u32, Value>,
-    saw_function_call: &mut bool,
+    saw_tool_call: &mut bool,
 ) -> Result<Vec<ProviderEvent>> {
     let kind = event
         .get("type")
@@ -290,7 +323,10 @@ fn response_events(
                 .get("item")
                 .cloned()
                 .ok_or_else(|| Error::Provider("output item event has no item".into()))?;
-            *saw_function_call |= item.get("type").and_then(Value::as_str) == Some("function_call");
+            *saw_tool_call |= matches!(
+                item.get("type").and_then(Value::as_str),
+                Some("function_call") | Some("custom_tool_call")
+            );
             output_items.insert(index, item);
         }
         "response.output_item.done" => {
@@ -299,7 +335,10 @@ fn response_events(
                 .get("item")
                 .cloned()
                 .ok_or_else(|| Error::Provider("output item event has no item".into()))?;
-            *saw_function_call |= item.get("type").and_then(Value::as_str) == Some("function_call");
+            *saw_tool_call |= matches!(
+                item.get("type").and_then(Value::as_str),
+                Some("function_call") | Some("custom_tool_call")
+            );
             output_items.insert(index, item.clone());
             result.push(ProviderEvent::OutputPart {
                 index,
@@ -334,10 +373,34 @@ fn response_events(
                 arguments: required_string(&event, "delta")?,
             });
         }
+        "response.custom_tool_call_input.delta" => {
+            let index = required_u32(&event, "output_index")?;
+            let item = output_items.get(&index);
+            result.push(ProviderEvent::CustomToolCallInputDelta {
+                index,
+                id: item
+                    .and_then(|item| item.get("call_id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                name: item
+                    .and_then(|item| item.get("name"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                input: required_string(&event, "delta")?,
+            });
+        }
+        "response.custom_tool_call_input.done" => {
+            let index = required_u32(&event, "output_index")?;
+            let input = required_string(&event, "input")?;
+            if let Some(item) = output_items.get_mut(&index) {
+                item["input"] = Value::String(input.clone());
+            }
+            result.push(ProviderEvent::CustomToolCallInputDone { index, input });
+        }
         "response.completed" => {
             append_usage(&mut result, event.get("response"))?;
             result.push(ProviderEvent::Finished {
-                reason: if *saw_function_call {
+                reason: if *saw_tool_call {
                     FinishReason::ToolCalls
                 } else {
                     FinishReason::Stop
@@ -439,6 +502,23 @@ fn output_item_part(provider_id: ProviderId, item: Value) -> MessagePart {
                 ToolCallId::from_external(call_id),
                 name.to_string(),
                 arguments,
+            )
+            .with_provider_data(provider_id, item)
+        }
+        Some("custom_tool_call") => {
+            let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
+                return MessagePart::provider_only(provider_id, item);
+            };
+            let Some(name) = item.get("name").and_then(Value::as_str) else {
+                return MessagePart::provider_only(provider_id, item);
+            };
+            let Some(input) = item.get("input").and_then(Value::as_str) else {
+                return MessagePart::provider_only(provider_id, item);
+            };
+            MessagePart::tool_call(
+                ToolCallId::from_external(call_id),
+                name.to_string(),
+                Value::String(input.to_string()),
             )
             .with_provider_data(provider_id, item)
         }
@@ -639,6 +719,7 @@ mod tests {
                 Arc::new(result),
             ],
             provider_id,
+            &[],
         );
 
         assert_eq!(input[0], native);
@@ -658,7 +739,7 @@ mod tests {
             tools: vec![ToolDefinition {
                 name: "read".into(),
                 description: "read a file".into(),
-                input_schema: serde_json::json!({ "type": "object" }),
+                input: ToolInputDefinition::JsonSchema(serde_json::json!({ "type": "object" })),
             }],
             cancellation: CancellationToken::new(),
         };
@@ -670,6 +751,58 @@ mod tests {
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "read");
         assert!(body.get("previous_response_id").is_none());
+    }
+
+    #[test]
+    fn responses_body_maps_text_tools_to_custom_tools() {
+        let tools = vec![
+            ToolDefinition {
+                name: "shell".into(),
+                description: "run a command".into(),
+                input: ToolInputDefinition::Text,
+            },
+            ToolDefinition {
+                name: "read".into(),
+                description: "read a file".into(),
+                input: ToolInputDefinition::JsonSchema(serde_json::json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } }
+                })),
+            },
+        ];
+        let request = ProviderRequest {
+            model: "gpt-test".into(),
+            messages: vec![Arc::new(Message::text(Role::User, "hello", "build", None))],
+            tools,
+            cancellation: CancellationToken::new(),
+        };
+        let body = responses_body(&request, ProviderId::new());
+        assert_eq!(body["tools"][0]["type"], "custom");
+        assert!(body["tools"][0].get("parameters").is_none());
+        assert_eq!(body["tools"][1]["type"], "function");
+        assert_eq!(body["tools"][1]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn responses_input_replays_text_tool_calls_as_custom_items() {
+        let shell = ToolDefinition {
+            name: "shell".into(),
+            description: "run a command".into(),
+            input: ToolInputDefinition::Text,
+        };
+        let message = Message {
+            content: vec![MessagePart::tool_call(
+                ToolCallId::from_external("call_shell"),
+                "shell".into(),
+                Value::String("printf hello".into()),
+            )],
+            ..Message::text(Role::Assistant, "", "build", None)
+        };
+        let input = responses_input(&[Arc::new(message)], ProviderId::new(), &[shell]);
+        assert_eq!(input[0]["type"], "custom_tool_call");
+        assert_eq!(input[0]["name"], "shell");
+        assert_eq!(input[0]["input"], "printf hello");
+        assert!(input[0].get("arguments").is_none());
     }
 
     #[test]
@@ -689,7 +822,7 @@ mod tests {
             "arguments": "{\"path\":\"README.md\"}"
         });
         let mut output_items = BTreeMap::new();
-        let mut saw_function_call = false;
+        let mut saw_tool_call = false;
         let reasoning_events = response_events(
             serde_json::json!({
                 "type": "response.output_item.done",
@@ -698,7 +831,7 @@ mod tests {
             }),
             provider_id,
             &mut output_items,
-            &mut saw_function_call,
+            &mut saw_tool_call,
         )?;
         let function_events = response_events(
             serde_json::json!({
@@ -708,7 +841,7 @@ mod tests {
             }),
             provider_id,
             &mut output_items,
-            &mut saw_function_call,
+            &mut saw_tool_call,
         )?;
 
         let ProviderEvent::OutputPart { part, .. } = &reasoning_events[0] else {
@@ -731,7 +864,91 @@ mod tests {
                     && arguments["path"] == "README.md"
         ));
         assert_eq!(part.provider_data.as_ref().unwrap().data, function_item);
-        assert!(saw_function_call);
+        assert!(saw_tool_call);
+        Ok(())
+    }
+
+    #[test]
+    fn custom_tool_streaming_events_accumulate_raw_input() -> crate::Result<()> {
+        let provider_id = ProviderId::new();
+        let mut output_items = BTreeMap::new();
+        let mut saw_tool_call = false;
+        response_events(
+            serde_json::json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "custom_tool_call",
+                    "id": "ctc_1",
+                    "call_id": "call_shell",
+                    "name": "shell",
+                    "input": ""
+                }
+            }),
+            provider_id,
+            &mut output_items,
+            &mut saw_tool_call,
+        )?;
+        let delta = response_events(
+            serde_json::json!({
+                "type": "response.custom_tool_call_input.delta",
+                "output_index": 0,
+                "delta": "printf "
+            }),
+            provider_id,
+            &mut output_items,
+            &mut saw_tool_call,
+        )?;
+        assert!(matches!(
+            delta.as_slice(),
+            [ProviderEvent::CustomToolCallInputDelta {
+                id: Some(id),
+                name: Some(name),
+                input,
+                ..
+            }] if id == "call_shell" && name == "shell" && input == "printf "
+        ));
+        let done = response_events(
+            serde_json::json!({
+                "type": "response.custom_tool_call_input.done",
+                "output_index": 0,
+                "input": "printf hello"
+            }),
+            provider_id,
+            &mut output_items,
+            &mut saw_tool_call,
+        )?;
+        assert!(matches!(
+            done.as_slice(),
+            [ProviderEvent::CustomToolCallInputDone { index: 0, input }] if input == "printf hello"
+        ));
+        let final_events = response_events(
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "custom_tool_call",
+                    "id": "ctc_1",
+                    "call_id": "call_shell",
+                    "name": "shell",
+                    "input": "printf hello"
+                }
+            }),
+            provider_id,
+            &mut output_items,
+            &mut saw_tool_call,
+        )?;
+        let ProviderEvent::OutputPart { part, .. } = &final_events[0] else {
+            panic!("expected finalized custom tool part")
+        };
+        assert!(matches!(
+            part.content.as_ref(),
+            Some(MessagePartContent::ToolCall { id, name, arguments })
+                if id.to_string() == "call_shell"
+                    && name == "shell"
+                    && arguments == &Value::String("printf hello".into())
+        ));
+        assert!(saw_tool_call);
         Ok(())
     }
 
@@ -743,7 +960,7 @@ mod tests {
             serde_json::json!({ "type": "unknown_item", "value": 1 }),
         ] {
             let mut output_items = BTreeMap::new();
-            let mut saw_function_call = false;
+            let mut saw_tool_call = false;
             let events = response_events(
                 serde_json::json!({
                     "type": "response.output_item.done",
@@ -752,7 +969,7 @@ mod tests {
                 }),
                 provider_id,
                 &mut output_items,
-                &mut saw_function_call,
+                &mut saw_tool_call,
             )?;
             let ProviderEvent::OutputPart { part, .. } = &events[0] else {
                 panic!("expected finalized part")

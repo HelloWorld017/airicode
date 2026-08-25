@@ -40,6 +40,7 @@ pub struct TerminalApp {
     model: String,
     streaming: String,
     reasoning: String,
+    tool_streaming: Option<(String, String)>,
     status: String,
 }
 
@@ -80,6 +81,7 @@ impl TerminalApp {
             model,
             streaming: String::new(),
             reasoning: String::new(),
+            tool_streaming: None,
             status: "ready".into(),
         }
     }
@@ -179,6 +181,17 @@ impl TerminalApp {
                     self.streaming.push_str(&text);
                 }
             }
+            RuntimeEvent::ToolInputDelta { name, input, .. } => {
+                let entry = self
+                    .tool_streaming
+                    .get_or_insert_with(|| (name.clone(), String::new()));
+                if entry.0 != name {
+                    entry.0 = name.clone();
+                    entry.1.clear();
+                }
+                entry.1.push_str(&input);
+                self.status = format!("preparing {name}");
+            }
             RuntimeEvent::ProviderUsageUpdated { usage, .. } => {
                 self.statusbar.usage = Some(usage);
             }
@@ -187,20 +200,24 @@ impl TerminalApp {
                 self.reasoning.clear();
             }
             RuntimeEvent::TurnCompleted { .. } => {
+                self.tool_streaming = None;
                 self.status = "ready".into();
             }
             RuntimeEvent::TurnCancelled { .. } => {
+                self.tool_streaming = None;
                 self.status = "cancelled".into();
             }
             RuntimeEvent::TurnFailed { error, .. } => {
                 self.streaming.clear();
                 self.reasoning.clear();
+                self.tool_streaming = None;
                 self.status = format!("error: {error}");
             }
             RuntimeEvent::ToolExecutionStarted { name, .. } => {
                 self.status = format!("running {name}");
             }
             RuntimeEvent::ToolExecutionFinished { .. } => {
+                self.tool_streaming = None;
                 self.status = "running".into();
             }
             _ => {}
@@ -225,6 +242,9 @@ impl TerminalApp {
         let text = timeline(
             &state,
             (!self.streaming.is_empty()).then_some(self.streaming.as_str()),
+            self.tool_streaming
+                .as_ref()
+                .map(|(name, input)| (name.as_str(), input.as_str())),
         )
         .into_iter()
         .map(render_entry)
@@ -272,5 +292,6 @@ fn render_entry(entry: TimelineEntry) -> Line<'static> {
         )),
         TimelineEntry::Note(note) => Line::from(format!("Note: {:?}", note.content)),
         TimelineEntry::StreamingAssistant { text, .. } => Line::from(format!("Assistant: {text}")),
+        TimelineEntry::StreamingTool { name, input } => Line::from(format!("Tool {name}: {input}")),
     }
 }

@@ -13,7 +13,8 @@ use super::{
     models::{
         ContextContributionPosition, ContextPriority, ContextSource, FinishReason, Message,
         MessagePart, MessagePartContent, ProjectId, ProviderEvent, ProviderRequest, Role,
-        RuntimeEvent, SessionGroupId, SessionId, ToolCallId, ToolOutput, TurnId,
+        RuntimeEvent, SessionGroupId, SessionId, ToolCallId, ToolInput, ToolInputDefinition,
+        ToolOutput, TurnId,
     },
     operations::Operations,
     registry::Registry,
@@ -314,6 +315,8 @@ impl TurnEngine {
                         id: ToolCallId::new(),
                         name: String::new(),
                         arguments: String::new(),
+                        custom: false,
+                        input_done: true,
                     });
                     if let Some(name) = name {
                         call.name = name;
@@ -322,6 +325,48 @@ impl TurnEngine {
                         call.id = ToolCallId::from_external(id.clone());
                     }
                     call.arguments.push_str(&arguments);
+                }
+                ProviderEvent::CustomToolCallInputDelta {
+                    index,
+                    id,
+                    name,
+                    input,
+                } => {
+                    let call = calls.entry(index).or_insert_with(|| AssembledCall {
+                        id: ToolCallId::new(),
+                        name: String::new(),
+                        arguments: String::new(),
+                        custom: true,
+                        input_done: false,
+                    });
+                    call.custom = true;
+                    call.input_done = false;
+                    if let Some(name) = name {
+                        call.name = name;
+                    }
+                    if let Some(id) = id {
+                        call.id = ToolCallId::from_external(id);
+                    }
+                    self.operations
+                        .emit(RuntimeEvent::ToolInputDelta {
+                            turn_id,
+                            name: call.name.clone(),
+                            input: input.clone(),
+                        })
+                        .await?;
+                    call.arguments.push_str(&input);
+                }
+                ProviderEvent::CustomToolCallInputDone { index, input } => {
+                    let call = calls.entry(index).or_insert_with(|| AssembledCall {
+                        id: ToolCallId::new(),
+                        name: String::new(),
+                        arguments: String::new(),
+                        custom: true,
+                        input_done: true,
+                    });
+                    call.custom = true;
+                    call.arguments = input;
+                    call.input_done = true;
                 }
                 ProviderEvent::OutputPart { index, part } => {
                     has_output_parts = true;
@@ -353,6 +398,20 @@ impl TurnEngine {
                                 Value::String(arguments) => arguments.clone(),
                                 arguments => arguments.to_string(),
                             },
+                            custom: part
+                                .provider_data
+                                .as_ref()
+                                .and_then(|data| data.data.get("type"))
+                                .and_then(Value::as_str)
+                                == Some("custom_tool_call")
+                                || self
+                                    .registry
+                                    .tool_by_name(name)
+                                    .map(|tool| {
+                                        matches!(tool.definition().input, ToolInputDefinition::Text)
+                                    })
+                                    .unwrap_or(false),
+                            input_done: true,
                         },
                         _ => return None,
                     };
@@ -379,6 +438,11 @@ impl TurnEngine {
             }
             parts
         };
+        if calls.values().any(|call| call.custom && !call.input_done) {
+            return Err(Error::Provider(
+                "custom tool input ended before the input was complete".into(),
+            ));
+        }
         Ok(CollectedRound {
             parts,
             calls: calls.into_values().collect(),
@@ -408,8 +472,16 @@ impl TurnEngine {
             })
             .await?;
         }
-        let input = serde_json::from_str::<Value>(&call.arguments)
-            .unwrap_or_else(|_| Value::String(call.arguments.clone()));
+        let input = match tool.definition().input {
+            ToolInputDefinition::Text => ToolInput::Text(call.arguments),
+            ToolInputDefinition::JsonSchema(_) => {
+                    let arguments = call.arguments;
+                    ToolInput::Json(
+                        serde_json::from_str::<Value>(&arguments)
+                            .unwrap_or(Value::String(arguments)),
+                    )
+            }
+        };
         let context = super::models::ToolContext {
             project_id: request.project_id.clone(),
             session_group_id: request.session_group_id,
@@ -521,6 +593,8 @@ struct AssembledCall {
     id: ToolCallId,
     name: String,
     arguments: String,
+    custom: bool,
+    input_done: bool,
 }
 
 #[cfg(test)]

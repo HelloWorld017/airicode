@@ -7,7 +7,8 @@ use serde_json::Value;
 use crate::core::{
     error::{Error, Result},
     models::{
-        CommandSpec, Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId, ToolOutput,
+        CommandSpec, Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId, ToolInput,
+        ToolInputDefinition, ToolOutput,
     },
     registry::PluginRegistryScope,
 };
@@ -58,11 +59,16 @@ impl Tool for ToolGrep {
         ToolDefinition {
             name: "grep".into(),
             description: "Search files visible through the current root-relative workdir using a regular-expression pattern. `path` optionally limits the search scope and `glob` optionally filters filenames. Results include file and line references and are size-limited. No matches are an expected tool failure, not an infrastructure error; this tool does not modify files.".into(),
-            input_schema: crate::utils::schema::json_schema::<GrepInputSchema>(),
+            input: ToolInputDefinition::JsonSchema(
+                crate::utils::schema::json_schema::<GrepInputSchema>(),
+            ),
         }
     }
 
-    async fn execute(&self, input: Value, context: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {
+        let ToolInput::Json(input) = input else {
+            return Err(Error::Tool("grep input must be an object".into()));
+        };
         let object = input
             .as_object()
             .ok_or_else(|| Error::Tool("grep input must be an object".into()))?;

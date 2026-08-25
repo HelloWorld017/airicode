@@ -60,6 +60,16 @@ pub enum ProviderEvent {
         name: Option<String>,
         arguments: String,
     },
+    CustomToolCallInputDelta {
+        index: u32,
+        id: Option<String>,
+        name: Option<String>,
+        input: String,
+    },
+    CustomToolCallInputDone {
+        index: u32,
+        input: String,
+    },
     OutputPart {
         index: u32,
         part: MessagePart,
