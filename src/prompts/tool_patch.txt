@@ -1,0 +1,109 @@
+Apply a raw text patch to files in the current workdir.
+
+This tool does NOT use standard unified diff or apply_patch syntax. Do not emit
+`*** Begin Patch`, `*** End Patch`, `*** Add File`, `*** Update File`, `*** Delete
+File`, `@@`, or `File:` markers. Do not wrap the patch in a Markdown code fence.
+
+## Input format
+
+The input is one or more operations. Every operation starts with exactly one
+header at the beginning of a line:
+
+`ADD path`
+`EDIT path`
+`DEL path`
+
+Paths are relative to the current workdir. Use the exact path returned by
+`read`, without a `File:` prefix.
+
+### ADD
+
+`ADD` creates a new file. Its body may contain only lines beginning with `+`.
+The text after `+` is the literal file content; do not add a line number or a
+hashline to an added line. The tool adds a final newline when the file has
+content.
+
+Example:
+
+ADD src/example.rs
++use std::fmt;
++
++pub fn example() {}
+
+An empty line in a new file is represented by a line containing only `+`.
+
+### DEL
+
+`DEL` deletes an existing file and has no body.
+
+Example:
+
+DEL src/obsolete.rs
+
+### EDIT
+
+`EDIT` changes one contiguous range in an existing file.
+If you call `read` tool, each `read` line looks like this:
+
+`14:241|pub mod ui_state;`
+
+In an EDIT body, copy only the anchor prefix through the pipe. The valid
+context anchor is ` 14:241|`, not ` 14:241|pub mod ui_state;`. The leading
+space is required. Hashes are exactly three characters and the pipe must be
+the final character of every context or deletion anchor.
+
+EDIT body line types:
+
+- unchanged context: ` 14:aXc|`
+- deleted old line: `-15:dc0|`
+- new line: `+contents of new line`
+
+Context lines are preserved. Delete lines are removed. Add lines contain only
+the new source text after `+`; never put a new line number or hash on an Add
+line.
+
+For every changed section, include three unchanged context anchors immediately
+before and after it when those lines are available. At the beginning or end of
+a short file which line count are less than three, include all available context lines.
+The context and deletion anchors must describe one contiguous range from the current file.
+
+Example shape for deleting one line and inserting a new line:
+
+EDIT src/example.rs
+ 31:agX|
+ 32:1as|
+ 33:z0b|
+-34:daj|
+ 35:aaX|
++inserted source line
+ 36:02v|
+ 37:xcv|
+ 38:2gs|
+
+The placeholders above are explanatory only. Replace every anchor with the
+exact line number and three-character hash copied from the latest `read`
+result. Never invent, shorten, or recompute an anchor.
+
+Even if you use an anchor with incorrect line number will be accepted, if the context hash is unique.
+If it cannot determine the exact patch location, it will guide you to re-`read` and update the anchor.
+
+Use separate EDIT operations for separate non-contiguous ranges. Do not use
+`@@` to separate hunks or to provide a line hint. If an edit fails because the
+file is stale, read the file again and build a new patch from the returned
+hashlines instead of retrying the old input.
+
+## Complete examples
+
+Multiple operations are written one after another with no wrapper:
+
+ADD src/new_module.rs
++pub fn run() {}
+
+EDIT src/lib.rs
+ 1:zxs|
++pub mod new_module;
+ 2:0B2|
+ 3:ss9|
+ 4:2v0|
+
+DEL src/old_module.rs

@@ -79,7 +79,7 @@ impl Tool for ToolPatch {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "patch".into(),
-            description: r#"Apply a raw diff-like patch to workdir files. Headers are `ADD path`, `DEL path`, or `EDIT path`. In an EDIT body, context lines use ` <line>:<3-character-hash>|`, deleted lines use `-<line>:<3-character-hash>|`, and new lines use `+<text>`; anchors must be copied from read output in full. Hashes are used first for matching. If multiple hash matches exist, both the line number and hash of every supplied anchor must match. Context is preserved, deletion lines are removed, and additions are inserted. An edit must include up to three available unchanged hashline context lines before and after its changed lines. Failed edits return the failed range and current surrounding hashline context so the file can be read again. ADD accepts only `+` lines and DEL has no body."#.into(),
+            description: include_str!("../prompts/tool_patch.txt").into(),
             input: ToolInputDefinition::Text,
         }
     }
@@ -695,5 +695,21 @@ impl Plugin for ToolPatchPlugin {
 
     async fn init(self: Arc<Self>, registry: PluginRegistryScope) -> Result<()> {
         registry.register_tool(self.tool.clone(), 0).map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn definition_uses_the_dedicated_patch_prompt() {
+        let definition = ToolPatch::new().definition();
+
+        assert_eq!(
+            definition.description,
+            include_str!("../prompts/tool_patch.txt")
+        );
+        assert_eq!(definition.input, ToolInputDefinition::Text);
     }
 }
