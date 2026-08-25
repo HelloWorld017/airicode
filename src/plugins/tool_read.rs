@@ -13,7 +13,7 @@ use crate::{
         },
         registry::PluginRegistryScope,
     },
-    utils::hashline,
+    utils::{hashline, path_correction, PathCorrectionKind},
 };
 
 #[allow(dead_code)]
@@ -61,7 +61,7 @@ impl Tool for ToolRead {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "read".into(),
-            description: r#"Read a UTF-8 text file from the current workdir and return hashline-annotated lines in the form `<line>:<hash>|<content>`. Use this output as the source of truth before editing: a patch must copy the hash after the colon exactly, and must not invent or modify hashline anchors. `start_line` and `end_line` are optional inclusive line limits. Binary/NUL-containing files and requests beyond the configured size or line limits fail."#.into(),
+            description: r#"Read a UTF-8 text file from the current workdir and return hashline-annotated lines in the form `<line>:<3-character-hash>|<content>`. Use this output as the source of truth before editing: a patch must copy the complete `<line>:<hash>|` anchor exactly. `start_line` and `end_line` are optional inclusive line limits. Binary/NUL-containing files and requests beyond the configured size or line limits fail."#.into(),
             input: ToolInputDefinition::JsonSchema(
                 crate::utils::schema::json_schema::<ReadInputSchema>(),
             ),
@@ -80,7 +80,21 @@ impl Tool for ToolRead {
             .ok_or_else(|| Error::Tool("read requires path".into()))?;
         let bytes = match context.workdir.read(Path::new(path)).await {
             Ok(bytes) => bytes,
-            Err(Error::Workdir(message)) => return Ok(ToolOutput::Failure { content: message }),
+            Err(Error::Workdir(message)) => {
+                let content = match path_correction(
+                    Path::new(path),
+                    context.workdir.as_ref(),
+                    PathCorrectionKind::File,
+                )
+                .await
+                {
+                    Ok(Some(correction)) => {
+                        format!("{message}\nDid you mean? {}", correction.path.display())
+                    }
+                    _ => message,
+                };
+                return Ok(ToolOutput::Failure { content });
+            }
             Err(error) => return Err(error),
         };
         if bytes.contains(&0) {

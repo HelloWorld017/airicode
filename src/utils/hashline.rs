@@ -19,10 +19,12 @@ pub fn tag(text: &str) -> String {
     digest
         .finalize()
         .iter()
-        .take(1)
+        .take(2)
         .map(|byte| format!("{byte:02x}"))
-        .collect::<String>()[..2]
-        .to_string()
+        .collect::<String>()
+        .chars()
+        .take(3)
+        .collect()
 }
 
 pub fn render(text: &str) -> Vec<HashLine> {
@@ -65,8 +67,12 @@ pub fn parse_anchor_value(value: &str) -> Option<Anchor> {
 
 pub fn parse_anchor(value: &str) -> Option<(usize, &str)> {
     let (line, rest) = value.split_once(':')?;
-    let (tag, _) = rest.split_once('|')?;
-    Some((line.parse().ok()?, tag))
+    let (tag, remainder) = rest.split_once('|')?;
+    if !remainder.is_empty() || tag.len() != 3 || tag.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let line = line.parse().ok()?;
+    (line > 0).then_some((line, tag))
 }
 
 pub fn split_lines_preserving_endings(text: &str) -> Vec<String> {
@@ -111,8 +117,16 @@ mod tests {
     #[test]
     fn tags_are_deterministic_and_detect_changes() {
         let first = format("one\ntwo");
-        assert_eq!(first, "1:76|one\n2:3f|two");
-        assert!(verify("one\ntwo", 1, "76"));
-        assert!(!verify("ONE\ntwo", 1, "76"));
+        assert_eq!(first, "1:769|one\n2:3fc|two");
+        assert!(verify("one\ntwo", 1, "769"));
+        assert!(!verify("ONE\ntwo", 1, "769"));
+    }
+
+    #[test]
+    fn anchors_require_the_full_three_character_tag() {
+        assert_eq!(parse_anchor("12:abc|"), Some((12, "abc")));
+        assert!(parse_anchor("12:ab|").is_none());
+        assert!(parse_anchor("12:abc|content").is_none());
+        assert!(parse_anchor("0:abc|").is_none());
     }
 }

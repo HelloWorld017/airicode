@@ -31,7 +31,7 @@
           src = craneLib.cleanCargoSource ./.;
           strictDeps = true;
           cargoExtraArgs = "--package ${cargoPackage}";
-          nativeBuildInputs = [ pkgs.git ];
+           nativeBuildInputs = [ pkgs.fd pkgs.git ];
           meta.mainProgram = cargoPackage;
         };
     in {
@@ -40,7 +40,7 @@
       };
 
       devShells.default = craneLib.devShell {
-        packages = with pkgs; [ git lld ];
+        packages = with pkgs; [ fd git lld ];
       };
     });
 }

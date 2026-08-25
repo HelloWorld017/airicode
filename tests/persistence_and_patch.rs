@@ -148,8 +148,8 @@ async fn patch_revalidates_hashline_and_stores_full_diff_as_note() -> Result<()>
     let first = patch
         .execute(
             ToolInput::Text(format!(
-                "EDIT main.rs\n {}|\n-{}|\n+TWO\n {}|",
-                tags[0].tag, tags[1].tag, tags[2].tag
+                "EDIT main.rs\n {}:{}|\n-{}:{}|\n+TWO\n {}:{}|",
+                tags[0].line, tags[0].tag, tags[1].line, tags[1].tag, tags[2].line, tags[2].tag
             )),
             context.clone(),
         )
@@ -165,8 +165,8 @@ async fn patch_revalidates_hashline_and_stores_full_diff_as_note() -> Result<()>
     let stale = patch
         .execute(
             ToolInput::Text(format!(
-                "EDIT main.rs\n {}|\n-{}|\n+again\n {}|",
-                tags[0].tag, tags[1].tag, tags[2].tag
+                "EDIT main.rs\n {}:{}|\n-{}:{}|\n+again\n {}:{}|",
+                tags[0].line, tags[0].tag, tags[1].line, tags[1].tag, tags[2].line, tags[2].tag
             )),
             context,
         )
@@ -176,7 +176,7 @@ async fn patch_revalidates_hashline_and_stores_full_diff_as_note() -> Result<()>
 }
 
 #[tokio::test]
-async fn patch_supports_add_delete_and_ambiguous_hashline_hints() -> Result<()> {
+async fn patch_supports_add_delete_and_line_disambiguation() -> Result<()> {
     let directory = tempdir()?;
     let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
     let group_id = SessionGroupId::new();
@@ -213,29 +213,33 @@ async fn patch_supports_add_delete_and_ambiguous_hashline_hints() -> Result<()> 
             b"before one\nbefore two\nbefore three\nsame\nafter one\nafter two\nafter three\nbefore one\nbefore two\nbefore three\nsame\nafter one\nafter two\nafter three\n",
         )
         .await?;
-    let repeated_tag = hashline::tag("same");
-    let before_one_tag = hashline::tag("before one");
-    let before_two_tag = hashline::tag("before two");
-    let before_three_tag = hashline::tag("before three");
-    let after_one_tag = hashline::tag("after one");
-    let after_two_tag = hashline::tag("after two");
-    let after_three_tag = hashline::tag("after three");
-    let repeated_body = format!(
-        " {before_one_tag}|\n {before_two_tag}|\n {before_three_tag}|\n-{repeated_tag}|\n+changed\n {after_one_tag}|\n {after_two_tag}|\n {after_three_tag}|"
+    let repeated_lines = hashline::render(
+        "before one\nbefore two\nbefore three\nsame\nafter one\nafter two\nafter three\nbefore one\nbefore two\nbefore three\nsame\nafter one\nafter two\nafter three\n",
     );
-    let ambiguous = patch
+    let repeated_body = format!(
+        " {}:{}|\n {}:{}|\n {}:{}|\n-{}:{}|\n+changed\n {}:{}|\n {}:{}|\n {}:{}|",
+        repeated_lines[7].line,
+        repeated_lines[7].tag,
+        repeated_lines[8].line,
+        repeated_lines[8].tag,
+        repeated_lines[9].line,
+        repeated_lines[9].tag,
+        repeated_lines[10].line,
+        repeated_lines[10].tag,
+        repeated_lines[11].line,
+        repeated_lines[11].tag,
+        repeated_lines[12].line,
+        repeated_lines[12].tag,
+        repeated_lines[13].line,
+        repeated_lines[13].tag,
+    );
+    let selected = patch
         .execute(
             ToolInput::Text(format!("EDIT repeated.txt\n{repeated_body}")),
             context.clone(),
         )
         .await?;
-    assert!(matches!(ambiguous, ToolOutput::Failure { content } if content.contains("ambiguous")));
-    patch
-        .execute(
-            ToolInput::Text(format!("EDIT repeated.txt@@8\n{repeated_body}")),
-            context.clone(),
-        )
-        .await?;
+    assert!(matches!(selected, ToolOutput::Success { .. }));
     assert_eq!(
         workdir.read(Path::new("repeated.txt")).await?,
         b"before one\nbefore two\nbefore three\nsame\nafter one\nafter two\nafter three\nbefore one\nbefore two\nbefore three\nchanged\nafter one\nafter two\nafter three\n"
@@ -252,7 +256,7 @@ async fn patch_supports_add_delete_and_ambiguous_hashline_hints() -> Result<()> 
 }
 
 #[tokio::test]
-async fn patch_rejects_insufficient_context_even_with_line_hint() -> Result<()> {
+async fn patch_rejects_insufficient_context_without_line_hint() -> Result<()> {
     let directory = tempdir()?;
     let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
     workdir
@@ -273,7 +277,7 @@ async fn patch_rejects_insufficient_context_even_with_line_hint() -> Result<()> 
     let target_tag = hashline::tag("three");
     let insufficient = patch
         .execute(
-            ToolInput::Text(format!("EDIT context.txt@@3\n-{target_tag}|\n+THREE")),
+            ToolInput::Text(format!("EDIT context.txt\n-3:{target_tag}|\n+THREE")),
             context.clone(),
         )
         .await?;
@@ -292,8 +296,13 @@ async fn patch_rejects_insufficient_context_even_with_line_hint() -> Result<()> 
     let accepted = patch
         .execute(
             ToolInput::Text(format!(
-                "EDIT short.txt@@1\n {}|\n-{}|\n+TWO\n {}|",
-                short[0].tag, short[1].tag, short[2].tag
+                "EDIT short.txt\n {}:{}|\n-{}:{}|\n+TWO\n {}:{}|",
+                short[0].line,
+                short[0].tag,
+                short[1].line,
+                short[1].tag,
+                short[2].line,
+                short[2].tag
             )),
             context,
         )

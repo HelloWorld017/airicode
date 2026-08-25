@@ -11,7 +11,7 @@ use airicode::{
         workdir::{NativeWorkdir, Workdir},
         Tool,
     },
-    plugins::{ToolRead, ToolReadPlugin, ToolShell, ToolShellPlugin},
+    plugins::{ToolFind, ToolGrep, ToolRead, ToolReadPlugin, ToolShell, ToolShellPlugin},
     Result,
 };
 use serde_json::json;
@@ -86,6 +86,75 @@ async fn read_and_shell_tools_use_the_shared_workdir_contract() -> Result<()> {
     };
     assert!(content.contains("exit 0"));
     assert!(content.contains("shell-output"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_suggests_a_corrected_path_and_grep_accepts_an_empty_path() -> Result<()> {
+    let directory = tempdir()?;
+    let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
+    workdir.write(Path::new("src/main.rs"), b"needle\n").await?;
+    let group_id = SessionGroupId::new();
+    let session = new_session(airicode::core::models::SessionId::new(group_id), group_id);
+    let context = ToolContext {
+        project_id: ProjectId::from_workdir(directory.path()),
+        session_group_id: group_id,
+        session_id: session.operations.session_id(),
+        turn_id: TurnId::new(),
+        operations: session.operations.clone(),
+        workdir,
+        cancellation: CancellationToken::new(),
+    };
+
+    let read = ToolRead::new();
+    let output = read
+        .execute(
+            ToolInput::Json(json!({ "path": "src/mian.rs" })),
+            context.clone(),
+        )
+        .await?;
+    assert!(matches!(
+        output,
+        ToolOutput::Failure { content }
+            if content.contains("Did you mean? src/main.rs")
+    ));
+
+    let grep = ToolGrep::new();
+    let output = grep
+        .execute(
+            ToolInput::Json(json!({ "pattern": "needle", "path": "" })),
+            context,
+        )
+        .await?;
+    assert!(
+        matches!(output, ToolOutput::Success { content } if content.contains("src/main.rs:1:needle"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn find_returns_exact_workdir_relative_file_paths() -> Result<()> {
+    let directory = tempdir()?;
+    std::fs::create_dir(directory.path().join("src"))?;
+    std::fs::write(directory.path().join("src/main.rs"), "fn main() {}")?;
+    let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
+    let group_id = SessionGroupId::new();
+    let session = new_session(airicode::core::models::SessionId::new(group_id), group_id);
+    let context = ToolContext {
+        project_id: ProjectId::from_workdir(directory.path()),
+        session_group_id: group_id,
+        session_id: session.operations.session_id(),
+        turn_id: TurnId::new(),
+        operations: session.operations,
+        workdir,
+        cancellation: CancellationToken::new(),
+    };
+
+    let find = ToolFind::new();
+    let output = find
+        .execute(ToolInput::Json(json!({ "name": "main.rs" })), context)
+        .await?;
+    assert!(matches!(output, ToolOutput::Success { content } if content == "src/main.rs"));
     Ok(())
 }
 

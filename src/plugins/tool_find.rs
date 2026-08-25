@@ -15,20 +15,20 @@ use crate::core::{
 
 #[allow(dead_code)]
 #[derive(JsonSchema)]
-struct GrepInputSchema {
-    pattern: String,
+struct FindInputSchema {
+    name: Option<String>,
+    pattern: Option<String>,
     path: Option<String>,
-    glob: Option<String>,
     max_results: Option<usize>,
 }
 
-pub struct ToolGrep {
+pub struct ToolFind {
     id: ToolId,
     max_output_bytes: usize,
     max_results: usize,
 }
 
-impl ToolGrep {
+impl ToolFind {
     pub fn new() -> Self {
         Self {
             id: ToolId::new(),
@@ -44,41 +44,43 @@ impl ToolGrep {
     }
 }
 
-impl Default for ToolGrep {
+impl Default for ToolFind {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl Tool for ToolGrep {
+impl Tool for ToolFind {
     fn id(&self) -> ToolId {
         self.id
     }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "grep".into(),
-            description: "Search files visible through the current workdir using a regular-expression pattern. `path` optionally limits the search scope and `glob` optionally filters filenames. Results include file and line references and are size-limited.".into(),
+            name: "find".into(),
+            description: "Find files by exact filename with fd and return their workdir-relative paths. Pass the filename as `name` (or `pattern`); `path` optionally limits the search root and `max_results` limits output.".into(),
             input: ToolInputDefinition::JsonSchema(
-                crate::utils::schema::json_schema::<GrepInputSchema>(),
+                crate::utils::schema::json_schema::<FindInputSchema>(),
             ),
         }
     }
 
     async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {
         let ToolInput::Json(input) = input else {
-            return Err(Error::Tool("grep input must be an object".into()));
+            return Err(Error::Tool("find input must be an object".into()));
         };
         let object = input
             .as_object()
-            .ok_or_else(|| Error::Tool("grep input must be an object".into()))?;
-        let pattern = object
-            .get("pattern")
+            .ok_or_else(|| Error::Tool("find input must be an object".into()))?;
+        let name = object
+            .get("name")
+            .or_else(|| object.get("pattern"))
             .and_then(Value::as_str)
-            .ok_or_else(|| Error::Tool("grep requires pattern".into()))?;
-        if pattern.is_empty() {
+            .ok_or_else(|| Error::Tool("find requires name".into()))?;
+        if name.is_empty() {
             return Ok(ToolOutput::Failure {
-                content: "grep pattern cannot be empty".into(),
+                content: "find name cannot be empty".into(),
             });
         }
         let path = object
@@ -92,24 +94,25 @@ impl Tool for ToolGrep {
             .map(|value| value as usize)
             .unwrap_or(self.max_results)
             .min(self.max_results);
-        let mut args = vec![
-            "--line-number".into(),
-            "--no-heading".into(),
-            "--color=never".into(),
-            "--hidden".into(),
-            "--glob".into(),
-            "!.git".into(),
-        ];
-        if let Some(glob) = object.get("glob").and_then(Value::as_str) {
-            args.extend(["--glob".into(), glob.into()]);
-        }
-        args.extend(["--".into(), pattern.into(), path.into()]);
+
         let result = context
             .workdir
             .execute(
                 CommandSpec {
-                    program: "rg".into(),
-                    args,
+                    program: "fd".into(),
+                    args: vec![
+                        "--type".into(),
+                        "f".into(),
+                        "--hidden".into(),
+                        "--exclude".into(),
+                        ".git".into(),
+                        "--glob".into(),
+                        "--max-results".into(),
+                        max_results.to_string(),
+                        "--".into(),
+                        name.into(),
+                        path.into(),
+                    ],
                     cwd: None::<PathBuf>,
                     env: Default::default(),
                     max_output_bytes: self.max_output_bytes,
@@ -125,19 +128,25 @@ impl Tool for ToolGrep {
         };
         if result.status == Some(1) && result.stdout.is_empty() {
             return Ok(ToolOutput::Failure {
-                content: "no matches".into(),
+                content: "no files found".into(),
             });
         }
         if result.status != Some(0) {
             return Ok(ToolOutput::Failure {
                 content: if result.stderr.is_empty() {
-                    format!("grep exited {:?}", result.status)
+                    format!("find exited {:?}", result.status)
                 } else {
                     result.stderr
                 },
             });
         }
-        let mut lines = result.stdout.lines().take(max_results).collect::<Vec<_>>();
+
+        let mut lines = result
+            .stdout
+            .lines()
+            .take(max_results)
+            .map(|line| line.strip_prefix("./").unwrap_or(line))
+            .collect::<Vec<_>>();
         if result.truncated || result.stdout.lines().count() > max_results {
             lines.push("[results truncated]");
         }
@@ -147,27 +156,34 @@ impl Tool for ToolGrep {
     }
 }
 
-pub struct ToolGrepPlugin {
+pub struct ToolFindPlugin {
     id: PluginId,
-    tool: Arc<ToolGrep>,
+    tool: Arc<ToolFind>,
 }
-impl ToolGrepPlugin {
+
+impl ToolFindPlugin {
     pub fn new() -> Self {
         Self {
             id: PluginId::new(),
-            tool: Arc::new(ToolGrep::new()),
+            tool: Arc::new(ToolFind::new()),
         }
+    }
+
+    pub fn tool(&self) -> Arc<ToolFind> {
+        self.tool.clone()
     }
 }
 
 #[async_trait]
-impl Plugin for ToolGrepPlugin {
+impl Plugin for ToolFindPlugin {
     fn id(&self) -> PluginId {
         self.id
     }
+
     fn name(&self) -> &str {
-        "tool_grep"
+        "tool_find"
     }
+
     async fn init(self: Arc<Self>, registry: PluginRegistryScope) -> Result<()> {
         registry.register_tool(self.tool.clone(), 0).map(|_| ())
     }

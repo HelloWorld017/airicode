@@ -4,6 +4,7 @@ pub mod provider_openai;
 pub mod native_workdir {
     pub use crate::core::workdir::{NativeWorkdir, Workdir, WorkdirLayer};
 }
+pub mod tool_find;
 pub mod tool_grep;
 pub mod tool_patch;
 pub mod tool_question;
@@ -20,6 +21,7 @@ pub use provider_openai::{
     OpenAIProvider, OpenAIProviderPlugin, OpenAiProvider, OpenAiProviderPlugin, ProviderOpenAI,
     ProviderOpenAIPlugin,
 };
+pub use tool_find::{ToolFind, ToolFindPlugin};
 pub use tool_grep::{ToolGrep, ToolGrepPlugin};
 pub use tool_patch::{ToolPatch, ToolPatchPlugin};
 pub use tool_question::{ToolQuestion, ToolQuestionPlugin};

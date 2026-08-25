@@ -28,14 +28,13 @@ enum OperationKind {
 struct Operation {
     kind: OperationKind,
     path: String,
-    line_hint: Option<usize>,
     body: Vec<BodyLine>,
 }
 
 #[derive(Clone, Debug)]
 enum BodyLine {
-    Context(String),
-    Delete(String),
+    Context(hashline::Anchor),
+    Delete(hashline::Anchor),
     Add(String),
 }
 
@@ -80,7 +79,7 @@ impl Tool for ToolPatch {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "patch".into(),
-            description: r#"Apply a raw diff-like patch to workdir files. Headers are `ADD path`, `DEL path`, or `EDIT path`; an EDIT may use `EDIT path@@<line>` to disambiguate a repeated match. In an EDIT body, context lines use ` <hash>|`, deleted lines use `-<hash>|`, and new lines use `+<text>`; hashes must be copied from read output (the part after `<line>:` and before `|`). Context is preserved, deletion lines are removed, and additions are inserted. The complete sequence of context/deletion hashes must match the current file exactly once. An edit must include up to three available unchanged hashline context lines before and after its changed lines; `@@<line>` does not bypass this requirement. A stale match fails, and multiple matches fail unless `@@<line>` identifies the starting line. ADD accepts only `+` lines and DEL has no body."#.into(),
+            description: r#"Apply a raw diff-like patch to workdir files. Headers are `ADD path`, `DEL path`, or `EDIT path`. In an EDIT body, context lines use ` <line>:<3-character-hash>|`, deleted lines use `-<line>:<3-character-hash>|`, and new lines use `+<text>`; anchors must be copied from read output in full. Hashes are used first for matching. If multiple hash matches exist, both the line number and hash of every supplied anchor must match. Context is preserved, deletion lines are removed, and additions are inserted. An edit must include up to three available unchanged hashline context lines before and after its changed lines. Failed edits return the failed range and current surrounding hashline context so the file can be read again. ADD accepts only `+` lines and DEL has no body."#.into(),
             input: ToolInputDefinition::Text,
         }
     }
@@ -251,13 +250,20 @@ impl ToolPatch {
             .body
             .iter()
             .filter_map(|line| match line {
-                BodyLine::Context(tag) | BodyLine::Delete(tag) => Some(tag.as_str()),
+                BodyLine::Context(anchor) | BodyLine::Delete(anchor) => Some(anchor),
                 BodyLine::Add(_) => None,
             })
             .collect::<Vec<_>>();
-        let start = find_unique_match(&old_lines, &pattern, operation.line_hint)?;
-        validate_context(&operation.body, &old_lines, start)?;
-        let replacement = replacement_text(&operation.body, &old_lines, start)?;
+        let start = find_unique_match(&old_lines, &pattern).map_err(|error| {
+            with_edit_context(error, &operation.path, &old_lines, &operation.body)
+        })?;
+        validate_context(&operation.body, &old_lines, start).map_err(|error| {
+            with_edit_context(error, &operation.path, &old_lines, &operation.body)
+        })?;
+        let replacement =
+            replacement_text(&operation.body, &old_lines, start).map_err(|error| {
+                with_edit_context(error, &operation.path, &old_lines, &operation.body)
+            })?;
         let end = start + pattern.len();
         let new = if pattern.is_empty() {
             insert_lines(&old, start + 1, &replacement)
@@ -320,12 +326,11 @@ fn parse_patch(text: &str) -> std::result::Result<Vec<Operation>, String> {
             if let Some(operation) = current.take() {
                 operations.push(operation);
             }
-            let (path, line_hint) = parse_path_hint(rest)
+            let path = parse_path(rest)
                 .ok_or_else(|| format!("invalid patch header at line {}", line_number + 1))?;
             current = Some(Operation {
                 kind,
                 path,
-                line_hint,
                 body: Vec::new(),
             });
             continue;
@@ -362,19 +367,12 @@ fn parse_header(line: &str) -> Option<(OperationKind, &str)> {
     .find_map(|(prefix, kind)| line.strip_prefix(prefix).map(|rest| (kind, rest)))
 }
 
-fn parse_path_hint(value: &str) -> Option<(String, Option<usize>)> {
+fn parse_path(value: &str) -> Option<String> {
     let value = value.trim();
-    if value.is_empty() {
+    if value.is_empty() || value.contains("@@") {
         return None;
     }
-    let (path, hint) = match value.rsplit_once("@@") {
-        Some((path, hint)) if !hint.is_empty() => (path, Some(hint.parse().ok()?)),
-        _ => (value, None),
-    };
-    if path.is_empty() || hint == Some(0) {
-        return None;
-    }
-    Some((path.to_string(), hint))
+    Some(value.to_string())
 }
 
 fn parse_body_line(line: &str) -> std::result::Result<BodyLine, String> {
@@ -385,34 +383,28 @@ fn parse_body_line(line: &str) -> std::result::Result<BodyLine, String> {
     let body = &line[prefix.len_utf8()..];
     match prefix {
         '+' => Ok(BodyLine::Add(body.to_string())),
-        ' ' => Ok(BodyLine::Context(parse_hash(body)?)),
-        '-' => Ok(BodyLine::Delete(parse_hash(body)?)),
+        ' ' => Ok(BodyLine::Context(parse_anchor(body)?)),
+        '-' => Ok(BodyLine::Delete(parse_anchor(body)?)),
         _ => Err("patch body lines must start with space, +, or -".into()),
     }
 }
 
-fn parse_hash(value: &str) -> std::result::Result<String, String> {
-    let (hash, remainder) = value
-        .split_once('|')
-        .ok_or_else(|| "hashline body must have the form '${hash}|'".to_string())?;
-    let hash = hash.trim();
-    if hash.is_empty() || !remainder.trim().is_empty() || hash.chars().any(char::is_whitespace) {
-        return Err("hashline body must have the form '${hash}|'".into());
-    }
-    Ok(hash.to_string())
+fn parse_anchor(value: &str) -> std::result::Result<hashline::Anchor, String> {
+    let (line, tag) = hashline::parse_anchor(value).ok_or_else(|| {
+        "hashline body must have the form '<line>:<3-character-hash>|'".to_string()
+    })?;
+    Ok(hashline::Anchor {
+        line,
+        tag: tag.to_string(),
+    })
 }
 
 fn find_unique_match(
     lines: &[hashline::HashLine],
-    pattern: &[&str],
-    line_hint: Option<usize>,
+    pattern: &[&hashline::Anchor],
 ) -> std::result::Result<usize, ApplyError> {
     if pattern.is_empty() {
-        return line_hint.map(|line| line.saturating_sub(1)).ok_or_else(|| {
-            ApplyError::Failure(
-                "EDIT requires hashline context or an @@<line> insertion hint".into(),
-            )
-        });
+        return Err(ApplyError::Failure("EDIT requires hashline context".into()));
     }
     if pattern.len() > lines.len() {
         return Err(ApplyError::Failure(
@@ -423,24 +415,89 @@ fn find_unique_match(
     for start in 0..=lines.len() - pattern.len() {
         if lines[start..start + pattern.len()]
             .iter()
-            .map(|line| line.tag.as_str())
-            .eq(pattern.iter().copied())
+            .zip(pattern.iter())
+            .all(|(line, anchor)| line.tag == anchor.tag)
         {
             matches.push(start);
         }
-    }
-    if let Some(line_hint) = line_hint {
-        matches.retain(|start| *start + 1 == line_hint);
     }
     match matches.as_slice() {
         [start] => Ok(*start),
         [] => Err(ApplyError::Failure(
             "stale patch: no matching hashline context".into(),
         )),
-        _ => Err(ApplyError::Failure(
-            "ambiguous patch: multiple hashline matches; add more context or add @@<line> to the header".into(),
-        )),
+        _ => {
+            let anchored_matches = matches
+                .into_iter()
+                .filter(|start| {
+                    lines[*start..*start + pattern.len()]
+                        .iter()
+                        .zip(pattern.iter())
+                        .all(|(line, anchor)| line.line == anchor.line && line.tag == anchor.tag)
+                })
+                .collect::<Vec<_>>();
+            match anchored_matches.as_slice() {
+                [start] => Ok(*start),
+                [] => Err(ApplyError::Failure(
+                    "stale patch: hashline matches found, but supplied line numbers do not match; read file and retry"
+                        .into(),
+                )),
+                _ => Err(ApplyError::Failure(
+                    "ambiguous patch: multiple hashline matches remain after line/hash validation; read file and retry"
+                        .into(),
+                )),
+            }
+        }
     }
+}
+
+fn with_edit_context(
+    error: ApplyError,
+    path: &str,
+    lines: &[hashline::HashLine],
+    body: &[BodyLine],
+) -> ApplyError {
+    match error {
+        ApplyError::Failure(message) => ApplyError::Failure(format!(
+            "{message}\nfailed edit range in {path}: {}\ncurrent context:\n{}",
+            edit_range(body),
+            surrounding_context(lines, body),
+        )),
+        ApplyError::Error(error) => ApplyError::Error(error),
+    }
+}
+
+fn edit_range(body: &[BodyLine]) -> String {
+    let lines = body.iter().filter_map(|line| match line {
+        BodyLine::Context(anchor) | BodyLine::Delete(anchor) => Some(anchor.line),
+        BodyLine::Add(_) => None,
+    });
+    let Some(first) = lines.clone().min() else {
+        return "unknown".into();
+    };
+    let last = lines.max().unwrap_or(first);
+    format!("{first}-{last}")
+}
+
+fn surrounding_context(lines: &[hashline::HashLine], body: &[BodyLine]) -> String {
+    if lines.is_empty() {
+        return "(file is empty)".into();
+    }
+    let requested = body.iter().filter_map(|line| match line {
+        BodyLine::Context(anchor) | BodyLine::Delete(anchor) => Some(anchor.line),
+        BodyLine::Add(_) => None,
+    });
+    let requested_start = requested.clone().min().unwrap_or(1);
+    let requested_end = requested.max().unwrap_or(requested_start);
+    let start = requested_start.clamp(1, lines.len());
+    let end = requested_end.clamp(start, lines.len());
+    let start = start.saturating_sub(3).max(1);
+    let end = end.saturating_add(3).min(lines.len());
+    lines[start - 1..end]
+        .iter()
+        .map(|line| format!("{}:{}|{}", line.line, line.tag, line.text))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn validate_context(
