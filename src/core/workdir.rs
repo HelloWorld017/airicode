@@ -1,5 +1,5 @@
 use std::{
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -17,31 +17,9 @@ use super::{
     models::{CommandResult, CommandSpec},
 };
 
-pub fn validate_relative_path(path: &Path) -> Result<()> {
-    if path.as_os_str().is_empty() || path.is_absolute() {
-        return Err(Error::Workdir(format!(
-            "path must be root-relative: {}",
-            path.display()
-        )));
-    }
-    for component in path.components() {
-        match component {
-            Component::Normal(_) | Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(Error::Workdir(format!(
-                    "path escapes workdir: {}",
-                    path.display()
-                )))
-            }
-        }
-    }
-    Ok(())
-}
-
 #[derive(Clone)]
 pub struct NativeWorkdir {
     root: Arc<PathBuf>,
-    canonical_root: Arc<PathBuf>,
 }
 
 impl NativeWorkdir {
@@ -56,50 +34,24 @@ impl NativeWorkdir {
             )));
         }
         Ok(Self {
-            canonical_root: Arc::new(root.clone()),
             root: Arc::new(root),
         })
     }
 
-    fn logical_path(&self, path: &Path) -> Result<PathBuf> {
-        validate_relative_path(path)?;
-        Ok(self.root.join(path))
-    }
-
-    fn ensure_inside(&self, path: &Path) -> Result<()> {
-        if path.starts_with(self.canonical_root.as_path()) {
-            Ok(())
-        } else {
-            Err(Error::Workdir(format!(
-                "path escapes workdir: {}",
-                path.display()
-            )))
-        }
-    }
-
-    async fn existing_path(&self, path: &Path) -> Result<PathBuf> {
-        let logical = self.logical_path(path)?;
-        let actual = fs::canonicalize(&logical)
-            .await
-            .map_err(|error| Error::Workdir(format!("{}: {error}", path.display())))?;
-        self.ensure_inside(&actual)?;
-        Ok(actual)
+    fn logical_path(&self, path: &Path) -> PathBuf {
+        self.root.join(path)
     }
 
     async fn writable_path(&self, path: &Path) -> Result<PathBuf> {
-        let logical = self.logical_path(path)?;
+        let logical = self.logical_path(path);
         let parent = logical
             .parent()
             .ok_or_else(|| Error::Workdir("path has no parent".into()))?;
         fs::create_dir_all(parent).await?;
-        let canonical_parent = fs::canonicalize(parent)
-            .await
-            .map_err(|error| Error::Workdir(format!("{}: {error}", parent.display())))?;
-        self.ensure_inside(&canonical_parent)?;
         let filename = logical
             .file_name()
             .ok_or_else(|| Error::Workdir("path has no filename".into()))?;
-        Ok(canonical_parent.join(filename))
+        Ok(parent.join(filename))
     }
 }
 
@@ -110,19 +62,16 @@ impl Workdir for NativeWorkdir {
     }
 
     async fn exists(&self, path: &Path) -> Result<bool> {
-        let logical = self.logical_path(path)?;
-        match fs::canonicalize(&logical).await {
-            Ok(actual) => {
-                self.ensure_inside(&actual)?;
-                Ok(true)
-            }
+        let logical = self.logical_path(path);
+        match fs::metadata(&logical).await {
+            Ok(_) => Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(Error::Workdir(format!("{}: {error}", path.display()))),
         }
     }
 
     async fn list(&self, path: &Path) -> Result<Vec<WorkdirEntry>> {
-        let directory = self.existing_path(path).await?;
+        let directory = self.logical_path(path);
         let metadata = fs::metadata(&directory).await?;
         if !metadata.is_dir() {
             return Err(Error::Workdir(format!(
@@ -146,13 +95,10 @@ impl Workdir for NativeWorkdir {
                 continue;
             };
 
-            let actual = fs::canonicalize(entry.path()).await?;
-            self.ensure_inside(&actual)?;
             let path = entry
                 .path()
                 .strip_prefix(self.root.as_path())
-                .map_err(|error| Error::Workdir(error.to_string()))?
-                .to_path_buf();
+                .map_or_else(|_| entry.path(), Path::to_path_buf);
             result.push(WorkdirEntry { path, kind });
         }
         result.sort_by(|left, right| left.path.cmp(&right.path));
@@ -160,7 +106,9 @@ impl Workdir for NativeWorkdir {
     }
 
     async fn read(&self, path: &Path) -> Result<Vec<u8>> {
-        Ok(fs::read(self.existing_path(path).await?).await?)
+        fs::read(self.logical_path(path))
+            .await
+            .map_err(|error| Error::Workdir(format!("{}: {error}", path.display())))
     }
 
     async fn write(&self, path: &Path, data: &[u8]) -> Result<()> {
@@ -179,7 +127,7 @@ impl Workdir for NativeWorkdir {
     }
 
     async fn remove(&self, path: &Path) -> Result<()> {
-        fs::remove_file(self.existing_path(path).await?).await?;
+        fs::remove_file(self.logical_path(path)).await?;
         Ok(())
     }
 
@@ -189,7 +137,7 @@ impl Workdir for NativeWorkdir {
         cancellation: CancellationToken,
     ) -> Result<CommandResult> {
         let cwd = match command.cwd.as_deref() {
-            Some(path) => self.existing_path(path).await?,
+            Some(path) => self.logical_path(path),
             None => self.root(),
         };
         let mut child = Command::new(&command.program);

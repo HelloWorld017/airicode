@@ -23,7 +23,7 @@ mod utils;
 use utils::{FakeProvider, FakeProviderPlugin};
 
 #[tokio::test]
-async fn native_workdir_enforces_root_and_executes_commands() -> Result<()> {
+async fn native_workdir_reads_writes_and_executes_commands() -> Result<()> {
     let directory = tempdir()?;
     let workdir = NativeWorkdir::new(directory.path())?;
 
@@ -38,9 +38,6 @@ async fn native_workdir_enforces_root_and_executes_commands() -> Result<()> {
         .await?;
     assert_eq!(result.status, Some(0));
     assert_eq!(result.stdout, "command-output");
-
-    assert!(workdir.read(Path::new("../outside")).await.is_err());
-    assert!(workdir.read(Path::new("/etc/passwd")).await.is_err());
     Ok(())
 }
 

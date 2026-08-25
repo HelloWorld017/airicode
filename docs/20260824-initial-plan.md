@@ -1048,19 +1048,7 @@ trait Workdir: Send + Sync {
 
 GitWorktree 같은 layer가 runtime에 active root를 바꿀 수 있기 때문이다.
 
-## 19.1 path contract
-
-Workdir API에 들어오는 path는 logical root-relative로 정의한다.
-
-거부:
-
-- 허용되지 않은 absolute path
-- `..`로 root escape
-- malformed path
-
-`CommandSpec.cwd`도 같은 계약을 따른다.
-
-## 19.2 WorkdirLayer
+## 19.1 WorkdirLayer
 
 ```rust
 struct WorkdirLayerContext {
@@ -1084,7 +1072,7 @@ trait WorkdirLayer: Send + Sync {
 
 Workdir은 SessionGroup 단위로 provision되기 때문이다.
 
-## 19.3 Layer ordering
+## 19.2 Layer ordering
 
 숫자 priority만 두는 것보다 phase를 같이 두는 것을 권장한다.
 
@@ -2209,13 +2197,8 @@ Debug mode에서 protocol 진단을 더 노출할 수 있다.
 
 # 36. Security baseline
 
-SandboxPlugin이 없어도 기본 Workdir path handling은 안전해야 한다.
-
-Sandbox는 optional isolation이지, Core path validation을 생략할 이유가 아니다.
-
 기본 요구사항:
 
-- root-relative API에서 path escape 방지
 - API key를 Session JSONL에 저장하지 않음
 - shell cancellation 시 child process 정리
 - untrusted MCP/webfetch input에 timeout/size limit
@@ -2456,7 +2439,6 @@ airicode .
 - Cancellation hierarchy
 - Registry conflict policy
 - Config namespace
-- Workdir path contract
 - Shared Workdir concurrency semantics
 - Plugin dependency rule
 
@@ -2829,7 +2811,7 @@ MCP server를 연결/해제해도 Core restart가 필요하지 않고 unrelated 
 3. `core: config bootstrap and lifecycle`
 4. `core: operations and session actor`
 5. `core: turn engine, fake provider, cancellation`
-6. `workdir: native backend and path contract`
+6. `workdir: native backend`
 7. `tools: read and shell`
 8. `plugin: append-only persistence`
 9. `provider: OpenAI adapter`

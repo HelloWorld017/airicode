@@ -18,7 +18,6 @@ async fn native_workdir_exists_and_lists_root_relative_entries() -> Result<()> {
     assert!(workdir.exists(Path::new("root.txt")).await?);
     assert!(workdir.exists(Path::new("src")).await?);
     assert!(!workdir.exists(Path::new("missing.txt")).await?);
-    assert!(workdir.exists(Path::new("../outside")).await.is_err());
 
     let entries = workdir.list(Path::new(".")).await?;
     assert_eq!(
