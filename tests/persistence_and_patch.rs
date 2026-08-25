@@ -148,14 +148,14 @@ async fn patch_revalidates_hashline_and_stores_full_diff_as_note() -> Result<()>
     let first = patch
         .execute(
             ToolInput::Text(format!(
-                "EDIT main.rs\n {}:{}|\n-{}:{}|\n+TWO\n {}:{}|",
-                tags[0].line, tags[0].tag, tags[1].line, tags[1].tag, tags[2].line, tags[2].tag
+                "REPLACE main.rs FROM {}:{} TO {}:{} <<<EOF\nTWO\nEOF",
+                tags[1].line, tags[1].tag, tags[1].line, tags[1].tag
             )),
             context.clone(),
         )
         .await?;
     assert!(
-        matches!(first, ToolOutput::Success { content } if content.contains("Updated main.rs"))
+        matches!(first, ToolOutput::Success { content } if content.contains("Replaced main.rs"))
     );
     assert_eq!(
         workdir.read(Path::new("main.rs")).await?,
@@ -165,8 +165,8 @@ async fn patch_revalidates_hashline_and_stores_full_diff_as_note() -> Result<()>
     let stale = patch
         .execute(
             ToolInput::Text(format!(
-                "EDIT main.rs\n {}:{}|\n-{}:{}|\n+again\n {}:{}|",
-                tags[0].line, tags[0].tag, tags[1].line, tags[1].tag, tags[2].line, tags[2].tag
+                "REPLACE main.rs FROM {}:{} TO {}:{} <<<EOF\nagain\nEOF",
+                tags[1].line, tags[1].tag, tags[1].line, tags[1].tag
             )),
             context,
         )
@@ -195,7 +195,8 @@ async fn patch_supports_add_delete_and_line_disambiguation() -> Result<()> {
         patch
             .execute(
                 ToolInput::Text(
-                    "ADD src/hi.txt\n+hi\n+how are you\n+i'm fine thank you and you".into()
+                    "ADD src/hi.txt <<<EOF\nhi\nhow are you\ni'm fine thank you and you\nEOF"
+                        .into()
                 ),
                 context.clone()
             )
@@ -216,26 +217,15 @@ async fn patch_supports_add_delete_and_line_disambiguation() -> Result<()> {
     let repeated_lines = hashline::render(
         "before one\nbefore two\nbefore three\nsame\nafter one\nafter two\nafter three\nbefore one\nbefore two\nbefore three\nsame\nafter one\nafter two\nafter three\n",
     );
-    let repeated_body = format!(
-        " {}:{}|\n {}:{}|\n {}:{}|\n-{}:{}|\n+changed\n {}:{}|\n {}:{}|\n {}:{}|",
-        repeated_lines[7].line,
-        repeated_lines[7].tag,
-        repeated_lines[8].line,
-        repeated_lines[8].tag,
-        repeated_lines[9].line,
-        repeated_lines[9].tag,
-        repeated_lines[10].line,
-        repeated_lines[10].tag,
-        repeated_lines[11].line,
-        repeated_lines[11].tag,
-        repeated_lines[12].line,
-        repeated_lines[12].tag,
-        repeated_lines[13].line,
-        repeated_lines[13].tag,
-    );
     let selected = patch
         .execute(
-            ToolInput::Text(format!("EDIT repeated.txt\n{repeated_body}")),
+            ToolInput::Text(format!(
+                "REPLACE repeated.txt FROM {}:{} TO {}:{} <<<EOF\nchanged\nEOF",
+                repeated_lines[10].line,
+                repeated_lines[10].tag,
+                repeated_lines[10].line,
+                repeated_lines[10].tag,
+            )),
             context.clone(),
         )
         .await?;
@@ -247,7 +237,7 @@ async fn patch_supports_add_delete_and_line_disambiguation() -> Result<()> {
 
     patch
         .execute(
-            airicode::core::models::ToolInput::Text("DEL src/hi.txt".into()),
+            airicode::core::models::ToolInput::Text("DELETE src/hi.txt".into()),
             context,
         )
         .await?;
@@ -256,7 +246,7 @@ async fn patch_supports_add_delete_and_line_disambiguation() -> Result<()> {
 }
 
 #[tokio::test]
-async fn patch_rejects_insufficient_context_without_line_hint() -> Result<()> {
+async fn patch_replaces_a_single_line_without_context_lines() -> Result<()> {
     let directory = tempdir()?;
     let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
     workdir
@@ -275,18 +265,18 @@ async fn patch_rejects_insufficient_context_without_line_hint() -> Result<()> {
     };
     let patch = ToolPatchHashline::new();
     let target_tag = hashline::tag("three");
-    let insufficient = patch
+    let replaced = patch
         .execute(
-            ToolInput::Text(format!("EDIT context.txt\n-3:{target_tag}|\n+THREE")),
+            ToolInput::Text(format!(
+                "REPLACE context.txt FROM 3:{target_tag} TO 3:{target_tag} <<<EOF\nTHREE\nEOF"
+            )),
             context.clone(),
         )
         .await?;
-    assert!(
-        matches!(insufficient, ToolOutput::Failure { content } if content.contains("insufficient hashline context"))
-    );
+    assert!(matches!(replaced, ToolOutput::Success { .. }));
     assert_eq!(
         workdir.read(Path::new("context.txt")).await?,
-        b"one\ntwo\nthree\nfour\nfive\n"
+        b"one\ntwo\nTHREE\nfour\nfive\n"
     );
 
     workdir
@@ -296,13 +286,8 @@ async fn patch_rejects_insufficient_context_without_line_hint() -> Result<()> {
     let accepted = patch
         .execute(
             ToolInput::Text(format!(
-                "EDIT short.txt\n {}:{}|\n-{}:{}|\n+TWO\n {}:{}|",
-                short[0].line,
-                short[0].tag,
-                short[1].line,
-                short[1].tag,
-                short[2].line,
-                short[2].tag
+                "REPLACE short.txt FROM {}:{} TO {}:{} <<<EOF\nTWO\nEOF",
+                short[1].line, short[1].tag, short[1].line, short[1].tag,
             )),
             context,
         )
@@ -311,6 +296,47 @@ async fn patch_rejects_insufficient_context_without_line_hint() -> Result<()> {
     assert_eq!(
         workdir.read(Path::new("short.txt")).await?,
         b"one\nTWO\nthree\n"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn patch_inserts_literal_heredoc_content_before_and_after() -> Result<()> {
+    let directory = tempdir()?;
+    let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
+    let original = "one\ntwo\nthree\n";
+    workdir
+        .write(Path::new("lines.txt"), original.as_bytes())
+        .await?;
+    let group_id = SessionGroupId::new();
+    let session = new_session(SessionId::new(group_id), group_id);
+    let context = ToolContext {
+        project_id: airicode::core::models::ProjectId::from_workdir(directory.path()),
+        session_group_id: session.operations.group_id(),
+        session_id: session.operations.session_id(),
+        turn_id: airicode::core::models::TurnId::new(),
+        operations: session.operations.clone(),
+        workdir: workdir.clone(),
+        cancellation: CancellationToken::new(),
+    };
+    let lines = hashline::render(original);
+    let patch = ToolPatchHashline::new();
+    let result = patch
+        .execute(
+            ToolInput::Text(format!(
+                "INSERT lines.txt BEFORE {}:{} <<<BEFORE\nbefore\n\n+literal\n-minus\nBEFORE\nINSERT lines.txt AFTER {}:{} <<<AFTER\nafter\nAFTER",
+                lines[1].line,
+                lines[1].tag,
+                lines[2].line,
+                lines[2].tag,
+            )),
+            context,
+        )
+        .await?;
+    assert!(matches!(result, ToolOutput::Success { .. }));
+    assert_eq!(
+        workdir.read(Path::new("lines.txt")).await?,
+        b"one\nbefore\n\n+literal\n-minus\ntwo\nthree\nafter\n"
     );
     Ok(())
 }

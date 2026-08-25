@@ -1,110 +1,103 @@
 Apply a raw text patch to files in the current workdir.
 
-This tool does NOT use standard unified diff or apply_patch syntax. Do not emit
-`*** Begin Patch`, `*** End Patch`, `*** Add File`, `*** Update File`, `*** Delete
-File`, `@@`, or `File:` markers. Do not wrap the patch in a Markdown code fence.
+Do not use standard unified diff or `apply_patch` syntax. Do not emit
+`*** Begin Patch`, `*** Add File`, `*** Update File`, `*** Delete File`, `@@`, or
+`File:` markers. Do not wrap the patch in a Markdown code fence.
 
 ## Input format
 
-The input is one or more operations. Every operation starts with exactly one
-header at the beginning of a line:
+Write one or more operations with one operation header at the beginning of a
+line. Heredoc content is literal text: blank lines, leading spaces, and lines
+starting with `+` or `-` are preserved exactly.
 
-`ADD path`
-`EDIT path`
-`DEL path`
-
-Paths are relative to the current workdir. Use the exact path returned by
-`read`, without a `File:` prefix.
+The heredoc closing tag must be the only text on its line. Use a tag that does
+not occur by itself on a content line.
 
 ### ADD
 
-`ADD` creates a new file. Its body may contain only lines beginning with `+`.
-The text after `+` is the literal file content; do not add a line number or a
-hashline to an added line. The tool adds a final newline when the file has
-content.
+`ADD path <<<TAG`
+`content`
+`TAG`
+
+`ADD` creates a new file and fails if the file already exists.
 
 Example:
 
-ADD src/example.rs
-+use std::fmt;
-+
-+pub fn example() {}
+ADD src/example.rs <<<EOF
+use std::fmt;
 
-An empty line in a new file is represented by a line containing only `+`.
-No context lines are needed for ADD.
+pub fn example() {}
+EOF
 
-### DEL
+### REPLACE
 
-`DEL` deletes an existing file and has no body.
+`REPLACE path FROM start-anchor TO end-anchor <<<TAG`
+`replacement content`
+`TAG`
+
+Anchors use the form `<line>:<3-character-hash>`, without the `|` from the
+`read` output. The range is inclusive. Hashes are matched first; line numbers
+disambiguate repeated hashes.
 
 Example:
 
-DEL src/obsolete.rs
+REPLACE src/example.rs FROM 14:241 TO 14:241 <<<EOF
+pub mod ui_state;
+EOF
 
-### EDIT
+### INSERT
 
-`EDIT` changes one contiguous range in an existing file.
-If you call `read` tool, each `read` line looks like this:
+`INSERT path BEFORE anchor <<<TAG`
+`content`
+`TAG`
 
-`14:241|pub mod ui_state;`
+or:
 
-In an EDIT body, copy only the anchor prefix through the pipe. The valid
-context anchor is ` 14:241|`, not ` 14:241|pub mod ui_state;`. The leading
-space is required. Hashes are exactly three characters and the pipe must be
-the final character of every context or deletion anchor.
+`INSERT path AFTER anchor <<<TAG`
+`content`
+`TAG`
 
-Example of EDIT body lines:
+The content is inserted immediately before or after the anchored line.
 
-- unchanged context: ` 14:a5c|`
-- deleted old line: `-15:dc0|`
-- new line: `+contents of new line`
+Example:
 
-Context lines are preserved. Delete lines are removed. Add lines contain only
-the new source text after `+`; never put a new line number or hash on an Add
-line.
+INSERT src/core/models/mod.rs BEFORE 16:e3b <<<EOF
+pub mod form;
+EOF
 
-For every changed section, include three unchanged context anchors immediately
-before and after it when those lines are available. At the beginning or end of
-a short file which line count are less than three, include all available context lines.
-The context and deletion anchors must describe one contiguous range from the current file.
+### DELETE
 
-Example shape for deleting one line and inserting a new line:
+`DELETE path`
 
-EDIT src/example.rs
- 31:agX|
- 32:1af|
- 33:z0b|
--34:daj|
- 35:aa7|
-+inserted source line
- 36:08W|
- 37:pcv|
- 38:2gs|
+`DELETE` removes the entire existing file and has no body.
 
-The placeholders above are explanatory only. Replace every anchor with the
-exact line number and three-character hash copied from the latest `read`
-result. Never invent, shorten, or recompute an anchor.
+## Rules
 
-Even if you use an anchor with incorrect line number will be accepted, if the context hash is unique.
-If it cannot determine the exact patch location, it will guide you to re-`read` and update the anchor.
+- Read the file before patching and use its hashline output.
+- Never invent, shorten, or recompute an anchor.
+- Do not include `|` or the source text in an anchor.
+- Use separate operations for separate ranges.
+- A missing or ambiguous anchor is stale; read the file again and build a new
+  patch instead of retrying the old input.
+- Operations are applied in order, so later anchors see earlier operations.
 
-Use separate EDIT operations for separate non-contiguous ranges. Do not use
-`@@` to separate hunks or to provide a line hint. If an edit fails because the
-file is stale, read the file again and build a new patch from the returned
-hashlines instead of retrying the old input.
+## Complete example
 
-## Complete examples
+ADD src/core/models/form.rs <<<EOF
+use serde::{Deserialize, Serialize};
 
-Multiple operations are written one after another with no wrapper:
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FormState {
+    pub active: usize,
+}
+EOF
 
-ADD src/new_module.rs
-+pub fn run() {}
+REPLACE src/core/models/mod.rs FROM 14:241 TO 14:241 <<<EOF
+pub mod ui_state;
+EOF
 
-EDIT src/lib.rs
- 1:zxs|
-+pub mod new_module;
- 2:0B4|
- 3:ss5|
- 4:2v0|
+INSERT src/core/models/mod.rs BEFORE 16:e3b <<<EOF
+pub mod form;
+EOF
 
-DEL src/old_module.rs
+DELETE src/core/models/obsolete.rs

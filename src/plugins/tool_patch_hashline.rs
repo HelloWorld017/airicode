@@ -15,27 +15,22 @@ use crate::{
     utils::hashline,
 };
 
-const MIN_CONTEXT_LINES: usize = 3;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OperationKind {
     Add,
     Delete,
-    Edit,
+    Replace,
+    InsertBefore,
+    InsertAfter,
 }
 
 #[derive(Clone, Debug)]
 struct Operation {
     kind: OperationKind,
     path: String,
-    body: Vec<BodyLine>,
-}
-
-#[derive(Clone, Debug)]
-enum BodyLine {
-    Context(hashline::Anchor),
-    Delete(hashline::Anchor),
-    Add(String),
+    start: Option<hashline::Anchor>,
+    end: Option<hashline::Anchor>,
+    body: String,
 }
 
 struct AppliedOperation {
@@ -124,23 +119,12 @@ impl Tool for ToolPatchHashline {
                         ("tool".into(), Value::String("patch".into())),
                         (
                             "operation".into(),
-                            Value::String(
-                                match operation.kind {
-                                    OperationKind::Add => "add",
-                                    OperationKind::Delete => "delete",
-                                    OperationKind::Edit => "edit",
-                                }
-                                .into(),
-                            ),
+                            Value::String(operation_name(operation.kind).into()),
                         ),
                     ],
                 )
                 .await?;
-            let verb = match operation.kind {
-                OperationKind::Add => "Added",
-                OperationKind::Delete => "Deleted",
-                OperationKind::Edit => "Updated",
-            };
+            let verb = operation_verb(operation.kind);
             summaries.push(format!("{verb} {} (+{added}/-{removed})", operation.path));
         }
         Ok(ToolOutput::Success {
@@ -163,7 +147,10 @@ impl ToolPatchHashline {
         match operation.kind {
             OperationKind::Add => self.apply_add(operation, context).await,
             OperationKind::Delete => self.apply_delete(operation, context).await,
-            OperationKind::Edit => self.apply_edit(operation, context).await,
+            OperationKind::Replace => self.apply_replace(operation, context).await,
+            OperationKind::InsertBefore | OperationKind::InsertAfter => {
+                self.apply_insert(operation, context).await
+            }
         }
     }
 
@@ -172,13 +159,6 @@ impl ToolPatchHashline {
         operation: Operation,
         context: &ToolContext,
     ) -> std::result::Result<AppliedOperation, ApplyError> {
-        if operation
-            .body
-            .iter()
-            .any(|line| !matches!(line, BodyLine::Add(_)))
-        {
-            return Err(ApplyError::Failure("ADD accepts only + lines".into()));
-        }
         match context.workdir.read(Path::new(&operation.path)).await {
             Ok(_) => {
                 return Err(ApplyError::Failure(format!(
@@ -189,8 +169,7 @@ impl ToolPatchHashline {
             Err(Error::Workdir(_)) => {}
             Err(error) => return Err(ApplyError::Error(error)),
         }
-        let new = added_text(&operation.body);
-        if new.len() > self.max_bytes {
+        if operation.body.len() > self.max_bytes {
             return Err(ApplyError::Failure(format!(
                 "patched file exceeds limit of {} bytes",
                 self.max_bytes
@@ -201,13 +180,13 @@ impl ToolPatchHashline {
         }
         context
             .workdir
-            .write(Path::new(&operation.path), new.as_bytes())
+            .write(Path::new(&operation.path), operation.body.as_bytes())
             .await
             .map_err(ApplyError::Error)?;
         Ok(AppliedOperation {
             path: operation.path,
             old: String::new(),
-            new,
+            new: operation.body,
             kind: OperationKind::Add,
         })
     }
@@ -217,11 +196,6 @@ impl ToolPatchHashline {
         operation: Operation,
         context: &ToolContext,
     ) -> std::result::Result<AppliedOperation, ApplyError> {
-        if !operation.body.is_empty() {
-            return Err(ApplyError::Failure(
-                "DEL does not accept patch body lines".into(),
-            ));
-        }
         let old = read_text(context, &operation.path).await?;
         if context.cancellation.is_cancelled() {
             return Err(ApplyError::Error(Error::Cancelled));
@@ -239,41 +213,37 @@ impl ToolPatchHashline {
         })
     }
 
-    async fn apply_edit(
+    async fn apply_replace(
         &self,
         operation: Operation,
         context: &ToolContext,
     ) -> std::result::Result<AppliedOperation, ApplyError> {
         let old = read_text(context, &operation.path).await?;
         let old_lines = hashline::render(&old);
-        let pattern = operation
-            .body
-            .iter()
-            .filter_map(|line| match line {
-                BodyLine::Context(anchor) | BodyLine::Delete(anchor) => Some(anchor),
-                BodyLine::Add(_) => None,
-            })
-            .collect::<Vec<_>>();
-        let start = find_unique_match(&old_lines, &pattern).map_err(|error| {
-            with_edit_context(error, &operation.path, &old_lines, &operation.body)
-        })?;
-        validate_context(&operation.body, &old_lines, start).map_err(|error| {
-            with_edit_context(error, &operation.path, &old_lines, &operation.body)
-        })?;
-        let replacement =
-            replacement_text(&operation.body, &old_lines, start).map_err(|error| {
-                with_edit_context(error, &operation.path, &old_lines, &operation.body)
-            })?;
-        let end = start + pattern.len();
-        let new = if pattern.is_empty() {
-            insert_lines(&old, start + 1, &replacement)
-                .ok_or_else(|| ApplyError::Failure("edit insertion is out of bounds".into()))?
-        } else {
-            hashline::replace_lines(&old, start + 1, end, &replacement)
-                .ok_or_else(|| ApplyError::Failure("edit match is out of bounds".into()))?
-        };
+        let start_anchor = operation
+            .start
+            .as_ref()
+            .ok_or_else(|| ApplyError::Failure("REPLACE requires a start anchor".into()))?;
+        let end_anchor = operation
+            .end
+            .as_ref()
+            .ok_or_else(|| ApplyError::Failure("REPLACE requires an end anchor".into()))?;
+        let anchors = [start_anchor, end_anchor];
+        let start = resolve_anchor(&old_lines, start_anchor)
+            .map_err(|error| with_patch_context(error, &operation.path, &old_lines, &anchors))?;
+        let end = resolve_anchor(&old_lines, end_anchor)
+            .map_err(|error| with_patch_context(error, &operation.path, &old_lines, &anchors))?;
+        if start > end {
+            return Err(ApplyError::Failure(
+                "REPLACE start anchor must not come after end anchor".into(),
+            ));
+        }
+        let new = hashline::replace_lines(&old, start + 1, end + 1, &operation.body)
+            .ok_or_else(|| ApplyError::Failure("replace range is out of bounds".into()))?;
         if new == old {
-            return Err(ApplyError::Failure("edit does not change the file".into()));
+            return Err(ApplyError::Failure(
+                "REPLACE does not change the file".into(),
+            ));
         }
         if new.len() > self.max_bytes {
             return Err(ApplyError::Failure(format!(
@@ -293,8 +263,76 @@ impl ToolPatchHashline {
             path: operation.path,
             old,
             new,
-            kind: OperationKind::Edit,
+            kind: OperationKind::Replace,
         })
+    }
+
+    async fn apply_insert(
+        &self,
+        operation: Operation,
+        context: &ToolContext,
+    ) -> std::result::Result<AppliedOperation, ApplyError> {
+        let old = read_text(context, &operation.path).await?;
+        let old_lines = hashline::render(&old);
+        let anchor = operation
+            .start
+            .as_ref()
+            .ok_or_else(|| ApplyError::Failure("INSERT requires an anchor".into()))?;
+        let anchors = [anchor];
+        let index = resolve_anchor(&old_lines, anchor)
+            .map_err(|error| with_patch_context(error, &operation.path, &old_lines, &anchors))?;
+        let line = match operation.kind {
+            OperationKind::InsertBefore => index + 1,
+            OperationKind::InsertAfter => index + 2,
+            _ => return Err(ApplyError::Failure("invalid INSERT operation".into())),
+        };
+        let new = insert_lines(&old, line, &operation.body)
+            .ok_or_else(|| ApplyError::Failure("insert position is out of bounds".into()))?;
+        if new == old {
+            return Err(ApplyError::Failure(
+                "INSERT does not change the file".into(),
+            ));
+        }
+        if new.len() > self.max_bytes {
+            return Err(ApplyError::Failure(format!(
+                "patched file exceeds limit of {} bytes",
+                self.max_bytes
+            )));
+        }
+        if context.cancellation.is_cancelled() {
+            return Err(ApplyError::Error(Error::Cancelled));
+        }
+        context
+            .workdir
+            .write(Path::new(&operation.path), new.as_bytes())
+            .await
+            .map_err(ApplyError::Error)?;
+        Ok(AppliedOperation {
+            path: operation.path,
+            old,
+            new,
+            kind: operation.kind,
+        })
+    }
+}
+
+fn operation_name(kind: OperationKind) -> &'static str {
+    match kind {
+        OperationKind::Add => "add",
+        OperationKind::Delete => "delete",
+        OperationKind::Replace => "replace",
+        OperationKind::InsertBefore => "insert_before",
+        OperationKind::InsertAfter => "insert_after",
+    }
+}
+
+fn operation_verb(kind: OperationKind) -> &'static str {
+    match kind {
+        OperationKind::Add => "Added",
+        OperationKind::Delete => "Deleted",
+        OperationKind::Replace => "Replaced",
+        OperationKind::InsertBefore => "Inserted before",
+        OperationKind::InsertAfter => "Inserted after",
     }
 }
 
@@ -315,135 +353,193 @@ async fn read_text(context: &ToolContext, path: &str) -> std::result::Result<Str
     String::from_utf8(bytes).map_err(|_| ApplyError::Failure("cannot patch non-UTF-8 input".into()))
 }
 
+#[derive(Clone, Debug)]
+struct OperationHeader {
+    kind: OperationKind,
+    path: String,
+    start: Option<hashline::Anchor>,
+    end: Option<hashline::Anchor>,
+    delimiter: Option<String>,
+}
+
 fn parse_patch(text: &str) -> std::result::Result<Vec<Operation>, String> {
     let mut operations = Vec::new();
-    let mut current: Option<Operation> = None;
-    for (line_number, line) in text.lines().enumerate() {
+    let mut lines = text.split_inclusive('\n').enumerate();
+    while let Some((line_number, raw_line)) = lines.next() {
+        let line = trim_line_ending(raw_line);
         if line.trim().is_empty() {
             continue;
         }
-        if let Some((kind, rest)) = parse_header(line) {
-            if let Some(operation) = current.take() {
-                operations.push(operation);
-            }
-            let path = parse_path(rest)
-                .ok_or_else(|| format!("invalid patch header at line {}", line_number + 1))?;
-            current = Some(Operation {
-                kind,
-                path,
-                body: Vec::new(),
+        let header = parse_header(line)
+            .map_err(|message| format!("{message} at line {}", line_number + 1))?;
+        let Some(delimiter) = header.delimiter.clone() else {
+            operations.push(Operation {
+                kind: header.kind,
+                path: header.path,
+                start: header.start,
+                end: header.end,
+                body: String::new(),
             });
             continue;
+        };
+
+        let mut body = String::new();
+        let mut closed = false;
+        for (_, raw_body_line) in lines.by_ref() {
+            if trim_line_ending(raw_body_line) == delimiter {
+                closed = true;
+                break;
+            }
+            body.push_str(raw_body_line);
         }
-        let operation = current
-            .as_mut()
-            .ok_or_else(|| format!("patch body before header at line {}", line_number + 1))?;
-        operation.body.push(
-            parse_body_line(line)
-                .map_err(|message| format!("{message} at line {}", line_number + 1))?,
-        );
-    }
-    if let Some(operation) = current {
-        operations.push(operation);
-    }
-    for operation in &operations {
-        if operation.path.is_empty() {
-            return Err("patch path cannot be empty".into());
+        if !closed {
+            return Err(format!(
+                "unterminated heredoc for {} at line {}",
+                header.path,
+                line_number + 1
+            ));
         }
-        if operation.kind == OperationKind::Delete && !operation.body.is_empty() {
-            return Err(format!("DEL {} does not accept body lines", operation.path));
-        }
+        operations.push(Operation {
+            kind: header.kind,
+            path: header.path,
+            start: header.start,
+            end: header.end,
+            body,
+        });
     }
     Ok(operations)
 }
 
-fn parse_header(line: &str) -> Option<(OperationKind, &str)> {
-    [
-        ("ADD ", OperationKind::Add),
-        ("DEL ", OperationKind::Delete),
-        ("EDIT ", OperationKind::Edit),
-    ]
-    .into_iter()
-    .find_map(|(prefix, kind)| line.strip_prefix(prefix).map(|rest| (kind, rest)))
+fn trim_line_ending(line: &str) -> &str {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    line.strip_suffix('\r').unwrap_or(line)
 }
 
-fn parse_path(value: &str) -> Option<String> {
+fn parse_header(line: &str) -> std::result::Result<OperationHeader, String> {
+    if let Some(rest) = line.strip_prefix("ADD ") {
+        let (path, delimiter) = split_heredoc(rest)?;
+        return Ok(OperationHeader {
+            kind: OperationKind::Add,
+            path: parse_path(path)?,
+            start: None,
+            end: None,
+            delimiter: Some(delimiter),
+        });
+    }
+    if let Some(rest) = line.strip_prefix("REPLACE ") {
+        let (spec, delimiter) = split_heredoc(rest)?;
+        let (path_and_start, end) = spec
+            .rsplit_once(" TO ")
+            .ok_or_else(|| "REPLACE header must contain FROM and TO anchors".to_string())?;
+        let (path, start) = path_and_start
+            .rsplit_once(" FROM ")
+            .ok_or_else(|| "REPLACE header must contain FROM and TO anchors".to_string())?;
+        return Ok(OperationHeader {
+            kind: OperationKind::Replace,
+            path: parse_path(path)?,
+            start: Some(parse_anchor(start)?),
+            end: Some(parse_anchor(end)?),
+            delimiter: Some(delimiter),
+        });
+    }
+    if let Some(rest) = line.strip_prefix("INSERT ") {
+        let (spec, delimiter) = split_heredoc(rest)?;
+        if let Some((path, anchor)) = spec.rsplit_once(" BEFORE ") {
+            return Ok(OperationHeader {
+                kind: OperationKind::InsertBefore,
+                path: parse_path(path)?,
+                start: Some(parse_anchor(anchor)?),
+                end: None,
+                delimiter: Some(delimiter),
+            });
+        }
+        if let Some((path, anchor)) = spec.rsplit_once(" AFTER ") {
+            return Ok(OperationHeader {
+                kind: OperationKind::InsertAfter,
+                path: parse_path(path)?,
+                start: Some(parse_anchor(anchor)?),
+                end: None,
+                delimiter: Some(delimiter),
+            });
+        }
+        return Err("INSERT header must contain BEFORE or AFTER and an anchor".into());
+    }
+    if let Some(rest) = line.strip_prefix("DELETE ") {
+        return Ok(OperationHeader {
+            kind: OperationKind::Delete,
+            path: parse_path(rest)?,
+            start: None,
+            end: None,
+            delimiter: None,
+        });
+    }
+    Err("invalid patch header".into())
+}
+
+fn split_heredoc(value: &str) -> std::result::Result<(&str, String), String> {
+    let (spec, delimiter) = value
+        .rsplit_once(" <<<")
+        .ok_or_else(|| "patch header must end with <<<heredoc-tag".to_string())?;
+    if delimiter.is_empty() || delimiter.chars().any(char::is_whitespace) {
+        return Err("heredoc tag cannot be empty or contain whitespace".into());
+    }
+    Ok((spec, delimiter.to_string()))
+}
+
+fn parse_path(value: &str) -> std::result::Result<String, String> {
     let value = value.trim();
     if value.is_empty() || value.contains("@@") {
-        return None;
+        return Err("patch path cannot be empty or contain @@".into());
     }
-    Some(value.to_string())
-}
-
-fn parse_body_line(line: &str) -> std::result::Result<BodyLine, String> {
-    let prefix = line
-        .chars()
-        .next()
-        .ok_or_else(|| "patch body line cannot be empty".to_string())?;
-    let body = &line[prefix.len_utf8()..];
-    match prefix {
-        '+' => Ok(BodyLine::Add(body.to_string())),
-        ' ' => Ok(BodyLine::Context(parse_anchor(body)?)),
-        '-' => Ok(BodyLine::Delete(parse_anchor(body)?)),
-        _ => Err("patch body lines must start with space, +, or -".into()),
-    }
+    Ok(value.to_string())
 }
 
 fn parse_anchor(value: &str) -> std::result::Result<hashline::Anchor, String> {
-    let (line, tag) = hashline::parse_anchor(value).ok_or_else(|| {
-        "hashline body must have the form '<line>:<3-character-hash>|'".to_string()
-    })?;
+    let (line, tag) = value
+        .trim()
+        .split_once(':')
+        .ok_or_else(|| "anchor must have the form '<line>:<3-character-hash>'".to_string())?;
+    let line = line
+        .parse::<usize>()
+        .ok()
+        .filter(|line| *line > 0)
+        .ok_or_else(|| "anchor line must be a positive number".to_string())?;
+    if tag.len() != 3 || !tag.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return Err("anchor hash must contain exactly three alphanumeric characters".into());
+    }
     Ok(hashline::Anchor {
         line,
         tag: tag.to_string(),
     })
 }
 
-fn find_unique_match(
+fn resolve_anchor(
     lines: &[hashline::HashLine],
-    pattern: &[&hashline::Anchor],
+    anchor: &hashline::Anchor,
 ) -> std::result::Result<usize, ApplyError> {
-    if pattern.is_empty() {
-        return Err(ApplyError::Failure("EDIT requires hashline context".into()));
-    }
-    if pattern.len() > lines.len() {
-        return Err(ApplyError::Failure(
-            "stale patch: no matching hashline context. read file and retry".into(),
-        ));
-    }
-    let mut matches = Vec::new();
-    for start in 0..=lines.len() - pattern.len() {
-        if lines[start..start + pattern.len()]
-            .iter()
-            .zip(pattern.iter())
-            .all(|(line, anchor)| line.tag == anchor.tag)
-        {
-            matches.push(start);
-        }
-    }
+    let matches = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| (line.tag == anchor.tag).then_some(index))
+        .collect::<Vec<_>>();
     match matches.as_slice() {
-        [start] => Ok(*start),
+        [index] => Ok(*index),
         [] => Err(ApplyError::Failure(
-            "stale patch: no matching hashline context".into(),
+            "stale patch: no matching hashline anchor; read file and retry".into(),
         )),
         _ => {
             let anchored_matches = matches
                 .into_iter()
-                .filter(|start| {
-                    lines[*start..*start + pattern.len()]
-                        .iter()
-                        .zip(pattern.iter())
-                        .all(|(line, anchor)| line.line == anchor.line && line.tag == anchor.tag)
-                })
+                .filter(|index| lines[*index].line == anchor.line)
                 .collect::<Vec<_>>();
             match anchored_matches.as_slice() {
-                [start] => Ok(*start),
+                [index] => Ok(*index),
                 [] => Err(ApplyError::Failure(
-                    "stale patch: hashline matches found, but supplied line numbers do not match; read file and retry"
+                    "stale patch: hashline matches found, but supplied line number does not match; read file and retry"
                         .into(),
                 )),
                 _ => Err(ApplyError::Failure(
-                    "ambiguous patch: multiple hashline matches remain after line/hash validation; read file and retry"
+                    "ambiguous patch: multiple hashline anchors remain after line validation; read file and retry"
                         .into(),
                 )),
             }
@@ -451,44 +547,44 @@ fn find_unique_match(
     }
 }
 
-fn with_edit_context(
+fn with_patch_context(
     error: ApplyError,
     path: &str,
     lines: &[hashline::HashLine],
-    body: &[BodyLine],
+    anchors: &[&hashline::Anchor],
 ) -> ApplyError {
     match error {
         ApplyError::Failure(message) => ApplyError::Failure(format!(
-            "{message}\nfailed edit range in {path}: {}\ncurrent context:\n{}",
-            edit_range(body),
-            surrounding_context(lines, body),
+            "{message}\nfailed patch range in {path}: {}\ncurrent context:\n{}",
+            patch_range(anchors),
+            surrounding_context(lines, anchors),
         )),
         ApplyError::Error(error) => ApplyError::Error(error),
     }
 }
 
-fn edit_range(body: &[BodyLine]) -> String {
-    let lines = body.iter().filter_map(|line| match line {
-        BodyLine::Context(anchor) | BodyLine::Delete(anchor) => Some(anchor.line),
-        BodyLine::Add(_) => None,
-    });
-    let Some(first) = lines.clone().min() else {
+fn patch_range(anchors: &[&hashline::Anchor]) -> String {
+    let Some(first) = anchors.iter().map(|anchor| anchor.line).min() else {
         return "unknown".into();
     };
-    let last = lines.max().unwrap_or(first);
+    let last = anchors
+        .iter()
+        .map(|anchor| anchor.line)
+        .max()
+        .unwrap_or(first);
     format!("{first}-{last}")
 }
 
-fn surrounding_context(lines: &[hashline::HashLine], body: &[BodyLine]) -> String {
+fn surrounding_context(lines: &[hashline::HashLine], anchors: &[&hashline::Anchor]) -> String {
     if lines.is_empty() {
         return "(file is empty)".into();
     }
-    let requested = body.iter().filter_map(|line| match line {
-        BodyLine::Context(anchor) | BodyLine::Delete(anchor) => Some(anchor.line),
-        BodyLine::Add(_) => None,
-    });
-    let requested_start = requested.clone().min().unwrap_or(1);
-    let requested_end = requested.max().unwrap_or(requested_start);
+    let requested_start = anchors.iter().map(|anchor| anchor.line).min().unwrap_or(1);
+    let requested_end = anchors
+        .iter()
+        .map(|anchor| anchor.line)
+        .max()
+        .unwrap_or(requested_start);
     let start = requested_start.clamp(1, lines.len());
     let end = requested_end.clamp(start, lines.len());
     let start = start.saturating_sub(3).max(1);
@@ -500,118 +596,27 @@ fn surrounding_context(lines: &[hashline::HashLine], body: &[BodyLine]) -> Strin
         .join("\n")
 }
 
-fn validate_context(
-    body: &[BodyLine],
-    lines: &[hashline::HashLine],
-    start: usize,
-) -> std::result::Result<(), ApplyError> {
-    let Some(first_change) = body.iter().position(is_change) else {
-        return Ok(());
-    };
-    let Some(last_change) = body.iter().rposition(is_change) else {
-        return Ok(());
-    };
-
-    let before_context = body[..first_change]
-        .iter()
-        .filter(|line| matches!(line, BodyLine::Context(_)))
-        .count();
-    let after_context = body[last_change + 1..]
-        .iter()
-        .filter(|line| matches!(line, BodyLine::Context(_)))
-        .count();
-
-    let mut old_offset = 0;
-    let mut changed_start = None;
-    let mut changed_end = None;
-    for line in body {
-        match line {
-            BodyLine::Context(_) => old_offset += 1,
-            BodyLine::Delete(_) => {
-                changed_start.get_or_insert(old_offset);
-                old_offset += 1;
-                changed_end = Some(old_offset);
-            }
-            BodyLine::Add(_) => {
-                let offset = changed_start.get_or_insert(old_offset);
-                changed_end = Some((*offset).max(old_offset));
-            }
-        }
-    }
-
-    let changed_start = start + changed_start.unwrap_or(0);
-    let changed_end = start + changed_end.unwrap_or(0);
-    let required_before = MIN_CONTEXT_LINES.min(changed_start);
-    let required_after = MIN_CONTEXT_LINES.min(lines.len().saturating_sub(changed_end));
-    if before_context < required_before || after_context < required_after {
-        return Err(ApplyError::Failure(format!(
-            "insufficient hashline context: include at least {required_before} line(s) before and {required_after} line(s) after the change"
-        )));
-    }
-    Ok(())
-}
-
-fn is_change(line: &BodyLine) -> bool {
-    matches!(line, BodyLine::Delete(_) | BodyLine::Add(_))
-}
-
-fn replacement_text(
-    body: &[BodyLine],
-    lines: &[hashline::HashLine],
-    start: usize,
-) -> std::result::Result<String, ApplyError> {
-    let mut old_offset = 0;
-    let mut replacement = Vec::new();
-    for line in body {
-        match line {
-            BodyLine::Context(_) => {
-                let value = lines.get(start + old_offset).ok_or_else(|| {
-                    ApplyError::Failure("hashline context is out of bounds".into())
-                })?;
-                replacement.push(value.text.clone());
-                old_offset += 1;
-            }
-            BodyLine::Delete(_) => old_offset += 1,
-            BodyLine::Add(value) => replacement.push(value.clone()),
-        }
-    }
-    Ok(replacement.join("\n"))
-}
-
-fn added_text(body: &[BodyLine]) -> String {
-    let mut lines = body.iter().filter_map(|line| match line {
-        BodyLine::Add(value) => Some(value.as_str()),
-        BodyLine::Context(_) | BodyLine::Delete(_) => None,
-    });
-    let Some(first) = lines.next() else {
-        return String::new();
-    };
-    let mut text = first.to_string();
-    for line in lines {
-        text.push('\n');
-        text.push_str(line);
-    }
-    text.push('\n');
-    text
-}
-
 fn insert_lines(text: &str, line: usize, replacement: &str) -> Option<String> {
-    let mut lines = hashline::split_lines_preserving_endings(text);
+    let lines = hashline::split_lines_preserving_endings(text);
     if line == 0 || line > lines.len() + 1 {
         return None;
     }
-    let mut replacement_lines = hashline::split_lines_preserving_endings(replacement);
-    if !replacement_lines.is_empty()
-        && line <= lines.len()
-        && lines[line - 1].ends_with('\n')
-        && !replacement_lines
-            .last()
-            .is_some_and(|value| value.ends_with('\n'))
-    {
-        replacement_lines.last_mut()?.push('\n');
+    if replacement.is_empty() {
+        return Some(text.to_string());
     }
-    lines.splice(line - 1..line - 1, replacement_lines);
-    Some(lines.concat())
+    let split = line - 1;
+    let before = lines[..split].concat();
+    let after = lines[split..].concat();
+    let mut result = before;
+    if !result.is_empty() && !result.ends_with('\n') {
+        result.push('\n');
+    }
+    result.push_str(replacement);
+    if !after.is_empty() && !result.ends_with('\n') {
+        result.push('\n');
+    }
+    result.push_str(&after);
+    Some(result)
 }
 
 fn unified_diff(path: &str, old: &str, new: &str) -> String {

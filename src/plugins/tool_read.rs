@@ -61,7 +61,7 @@ impl Tool for ToolRead {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "read".into(),
-            description: r#"Read a UTF-8 text file from the current workdir and return hashline-annotated lines in the form `<line>:<3-character-hash>|<content>`. Use this output as the source of truth before editing: a patch must copy the complete `<line>:<hash>|` anchor exactly. `start_line` and `end_line` are optional inclusive line limits. Binary/NUL-containing files and requests beyond the configured size or line limits fail."#.into(),
+            description: r#"Read a UTF-8 text file from the current workdir and return hashline-annotated lines in the form `<line>:<3-character-hash>|<content>`. Use this output as the source of truth before patching: copy only the `<line>:<hash>` prefix into a patch anchor, without the `|` or source text. `start_line` and `end_line` are optional inclusive line limits. Binary/NUL-containing files and requests beyond the configured size or line limits fail."#.into(),
             input: ToolInputDefinition::JsonSchema(
                 crate::utils::schema::json_schema::<ReadInputSchema>(),
             ),
