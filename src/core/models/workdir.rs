@@ -16,6 +16,18 @@ pub struct WorkdirLayerContext {
     pub session_group_id: SessionGroupId,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkdirEntryKind {
+    File,
+    Directory,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkdirEntry {
+    pub path: PathBuf,
+    pub kind: WorkdirEntryKind,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub enum WorkdirLayerPhase {
     Provision,
@@ -26,6 +38,8 @@ pub enum WorkdirLayerPhase {
 #[async_trait]
 pub trait Workdir: Send + Sync {
     fn root(&self) -> PathBuf;
+    async fn exists(&self, path: &Path) -> Result<bool>;
+    async fn list(&self, path: &Path) -> Result<Vec<WorkdirEntry>>;
     async fn read(&self, path: &Path) -> Result<Vec<u8>>;
     async fn write(&self, path: &Path, data: &[u8]) -> Result<()>;
     async fn remove(&self, path: &Path) -> Result<()>;

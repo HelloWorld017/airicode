@@ -58,7 +58,7 @@ impl Tool for ToolGrep {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "grep".into(),
-            description: "Search files visible through the current root-relative workdir using a regular-expression pattern. `path` optionally limits the search scope and `glob` optionally filters filenames. Results include file and line references and are size-limited. No matches are an expected tool failure, not an infrastructure error; this tool does not modify files.".into(),
+            description: "Search files visible through the current root-relative workdir using a regular-expression pattern. `path` optionally limits the search scope and `glob` optionally filters filenames. Results include file and line references and are size-limited.".into(),
             input: ToolInputDefinition::JsonSchema(
                 crate::utils::schema::json_schema::<GrepInputSchema>(),
             ),

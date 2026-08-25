@@ -11,7 +11,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-pub use super::models::workdir::{Workdir, WorkdirLayer};
+pub use super::models::workdir::{Workdir, WorkdirEntry, WorkdirEntryKind, WorkdirLayer};
 use super::{
     error::{Error, Result},
     models::{CommandResult, CommandSpec},
@@ -107,6 +107,56 @@ impl NativeWorkdir {
 impl Workdir for NativeWorkdir {
     fn root(&self) -> PathBuf {
         (*self.root).clone()
+    }
+
+    async fn exists(&self, path: &Path) -> Result<bool> {
+        let logical = self.logical_path(path)?;
+        match fs::canonicalize(&logical).await {
+            Ok(actual) => {
+                self.ensure_inside(&actual)?;
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(Error::Workdir(format!("{}: {error}", path.display()))),
+        }
+    }
+
+    async fn list(&self, path: &Path) -> Result<Vec<WorkdirEntry>> {
+        let directory = self.existing_path(path).await?;
+        let metadata = fs::metadata(&directory).await?;
+        if !metadata.is_dir() {
+            return Err(Error::Workdir(format!(
+                "not a directory: {}",
+                path.display()
+            )));
+        }
+
+        let mut entries = fs::read_dir(&directory).await?;
+        let mut result = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            let file_type = entry.file_type().await?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            let kind = if file_type.is_dir() {
+                WorkdirEntryKind::Directory
+            } else if file_type.is_file() {
+                WorkdirEntryKind::File
+            } else {
+                continue;
+            };
+
+            let actual = fs::canonicalize(entry.path()).await?;
+            self.ensure_inside(&actual)?;
+            let path = entry
+                .path()
+                .strip_prefix(self.root.as_path())
+                .map_err(|error| Error::Workdir(error.to_string()))?
+                .to_path_buf();
+            result.push(WorkdirEntry { path, kind });
+        }
+        result.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(result)
     }
 
     async fn read(&self, path: &Path) -> Result<Vec<u8>> {
