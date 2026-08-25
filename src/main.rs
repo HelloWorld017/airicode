@@ -21,8 +21,7 @@ async fn main() -> airicode::Result<()> {
     let project = project_from_path(root.clone());
     let workdir = Arc::new(airicode::core::workdir::NativeWorkdir::new(root.clone())?);
     let persistence = Arc::new(PersistencePlugin::new());
-    let openai = Arc::new(OpenAiProviderPlugin::new());
-    let mut builder = CoreBuilder::new()
+    let builder = CoreBuilder::new()
         .project(project.clone())
         .plugin(persistence.clone())
         .plugin(Arc::new(InstructionBasePlugin::new()))
@@ -32,17 +31,19 @@ async fn main() -> airicode::Result<()> {
         .plugin(Arc::new(ToolGrepPlugin::new()))
         .plugin(Arc::new(ToolTodoPlugin::new()))
         .plugin(Arc::new(ToolQuestionPlugin::new()))
-        .plugin(Arc::new(ToolWebfetchPlugin::new()));
-    if std::env::var_os("OPENAI_API_KEY").is_some() {
-        builder = builder.plugin(openai.clone());
-    }
+        .plugin(Arc::new(ToolWebfetchPlugin::new()))
+        .plugin(Arc::new(OpenAiProviderPlugin::new()));
+
     let core = builder.build().await?;
-    let provider_id = openai.provider_id();
-    if core.registry().provider(provider_id).is_none() {
-        return Err(airicode::Error::Config(
-            "OpenAI provider is not configured; set OPENAI_API_KEY before starting airicode".into(),
-        ));
-    }
+    let provider_id = match core.registry().providers().iter().next() {
+        Some(provider) => provider.id(),
+        None => {
+            return Err(airicode::Error::Config(
+                "Provider is not configured; setup provider before starting airicode".into(),
+            ));
+        }
+    };
+
     let (session, group_id) = match persistence.discover().await?.into_iter().next() {
         Some(session_id) => {
             let group_id = session_id.group_id();

@@ -110,6 +110,26 @@ impl Registry {
             .map(|entry| entry.value.clone())
     }
 
+    pub fn providers(&self) -> Vec<Arc<dyn Provider>> {
+        let mut values = self
+            .inner
+            .state
+            .read()
+            .expect("registry poisoned")
+            .providers
+            .values()
+            .map(|entry| Registered {
+                value: entry.value.clone(),
+                owner: entry.owner,
+                priority: entry.priority,
+                order: entry.order,
+                registration_id: entry.registration_id,
+            })
+            .collect::<Vec<_>>();
+        values.sort_by_key(|entry| (-entry.priority, entry.order));
+        values.into_iter().map(|entry| entry.value).collect()
+    }
+
     pub fn tool(&self, id: ToolId) -> Option<Arc<dyn Tool>> {
         self.inner
             .state
