@@ -203,7 +203,7 @@ fn responses_body(request: &ProviderRequest, provider_id: ProviderId) -> Value {
         "stream": true,
         "store": false,
         "include": ["reasoning.encrypted_content"],
-        "reasoning": { "summary": "auto" },
+        "reasoning": { "summary": "auto", "effort": "high" },
     })
 }
 

@@ -11,7 +11,7 @@ use airicode::{
         workdir::{NativeWorkdir, Workdir},
         Tool,
     },
-    plugins::{JsonlSessionStore, ToolPatch},
+    plugins::{JsonlSessionStore, ToolPatchHashline},
     utils::hashline,
     Result,
 };
@@ -144,7 +144,7 @@ async fn patch_revalidates_hashline_and_stores_full_diff_as_note() -> Result<()>
         cancellation: CancellationToken::new(),
     };
     let tags = hashline::render("one\ntwo\nthree\n");
-    let patch = ToolPatch::new();
+    let patch = ToolPatchHashline::new();
     let first = patch
         .execute(
             ToolInput::Text(format!(
@@ -190,7 +190,7 @@ async fn patch_supports_add_delete_and_line_disambiguation() -> Result<()> {
         workdir: workdir.clone(),
         cancellation: CancellationToken::new(),
     };
-    let patch = ToolPatch::new();
+    let patch = ToolPatchHashline::new();
     assert!(matches!(
         patch
             .execute(
@@ -273,7 +273,7 @@ async fn patch_rejects_insufficient_context_without_line_hint() -> Result<()> {
         workdir: workdir.clone(),
         cancellation: CancellationToken::new(),
     };
-    let patch = ToolPatch::new();
+    let patch = ToolPatchHashline::new();
     let target_tag = hashline::tag("three");
     let insufficient = patch
         .execute(

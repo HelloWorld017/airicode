@@ -1,5 +1,7 @@
 use sha2::{Digest, Sha256};
 
+const BASE62: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HashLine {
     pub line: usize,
@@ -16,15 +18,14 @@ pub struct Anchor {
 pub fn tag(text: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(text.as_bytes());
-    digest
-        .finalize()
-        .iter()
-        .take(2)
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>()
-        .chars()
-        .take(3)
-        .collect()
+    let digest = digest.finalize();
+    let mut value = u16::from_be_bytes([digest[0], digest[1]]);
+    let mut tag = [0; 3];
+    for digit in tag.iter_mut().rev() {
+        *digit = BASE62[usize::from(value % 62)];
+        value /= 62;
+    }
+    tag.iter().map(|byte| char::from(*byte)).collect()
 }
 
 pub fn render(text: &str) -> Vec<HashLine> {
@@ -68,7 +69,10 @@ pub fn parse_anchor_value(value: &str) -> Option<Anchor> {
 pub fn parse_anchor(value: &str) -> Option<(usize, &str)> {
     let (line, rest) = value.split_once(':')?;
     let (tag, remainder) = rest.split_once('|')?;
-    if !remainder.is_empty() || tag.len() != 3 || tag.chars().any(char::is_whitespace) {
+    if !remainder.is_empty()
+        || tag.len() != 3
+        || !tag.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
         return None;
     }
     let line = line.parse().ok()?;
@@ -117,9 +121,9 @@ mod tests {
     #[test]
     fn tags_are_deterministic_and_detect_changes() {
         let first = format("one\ntwo");
-        assert_eq!(first, "1:769|one\n2:3fc|two");
-        assert!(verify("one\ntwo", 1, "769"));
-        assert!(!verify("ONE\ntwo", 1, "769"));
+        assert_eq!(first, "1:7ta|one\n2:4FI|two");
+        assert!(verify("one\ntwo", 1, "7ta"));
+        assert!(!verify("ONE\ntwo", 1, "7ta"));
     }
 
     #[test]
@@ -128,5 +132,6 @@ mod tests {
         assert!(parse_anchor("12:ab|").is_none());
         assert!(parse_anchor("12:abc|content").is_none());
         assert!(parse_anchor("0:abc|").is_none());
+        assert!(parse_anchor("12:ab_|").is_none());
     }
 }

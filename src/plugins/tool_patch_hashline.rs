@@ -45,12 +45,12 @@ struct AppliedOperation {
     kind: OperationKind,
 }
 
-pub struct ToolPatch {
+pub struct ToolPatchHashline {
     id: ToolId,
     max_bytes: usize,
 }
 
-impl ToolPatch {
+impl ToolPatchHashline {
     pub fn new() -> Self {
         Self {
             id: ToolId::new(),
@@ -64,21 +64,21 @@ impl ToolPatch {
     }
 }
 
-impl Default for ToolPatch {
+impl Default for ToolPatchHashline {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl Tool for ToolPatch {
+impl Tool for ToolPatchHashline {
     fn id(&self) -> ToolId {
         self.id
     }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "patch".into(),
+            name: "patch_hashline".into(),
             description: include_str!("../prompts/tool_patch.txt").into(),
             input: ToolInputDefinition::Text,
         }
@@ -154,7 +154,7 @@ enum ApplyError {
     Error(Error),
 }
 
-impl ToolPatch {
+impl ToolPatchHashline {
     async fn apply_operation(
         &self,
         operation: Operation,
@@ -669,22 +669,22 @@ fn diff_stats(diff: &str) -> (usize, usize) {
     (added, removed)
 }
 
-pub struct ToolPatchPlugin {
+pub struct ToolPatchHashlinePlugin {
     id: PluginId,
-    tool: Arc<ToolPatch>,
+    tool: Arc<ToolPatchHashline>,
 }
 
-impl ToolPatchPlugin {
+impl ToolPatchHashlinePlugin {
     pub fn new() -> Self {
         Self {
             id: PluginId::new(),
-            tool: Arc::new(ToolPatch::new()),
+            tool: Arc::new(ToolPatchHashline::new()),
         }
     }
 }
 
 #[async_trait]
-impl Plugin for ToolPatchPlugin {
+impl Plugin for ToolPatchHashlinePlugin {
     fn id(&self) -> PluginId {
         self.id
     }
@@ -704,7 +704,7 @@ mod tests {
 
     #[test]
     fn definition_uses_the_dedicated_patch_prompt() {
-        let definition = ToolPatch::new().definition();
+        let definition = ToolPatchHashline::new().definition();
 
         assert_eq!(
             definition.description,

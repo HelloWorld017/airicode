@@ -31,6 +31,7 @@ ADD src/example.rs
 +pub fn example() {}
 
 An empty line in a new file is represented by a line containing only `+`.
+No context lines are needed for ADD.
 
 ### DEL
 
@@ -52,9 +53,9 @@ context anchor is ` 14:241|`, not ` 14:241|pub mod ui_state;`. The leading
 space is required. Hashes are exactly three characters and the pipe must be
 the final character of every context or deletion anchor.
 
-EDIT body line types:
+Example of EDIT body lines:
 
-- unchanged context: ` 14:aXc|`
+- unchanged context: ` 14:a5c|`
 - deleted old line: `-15:dc0|`
 - new line: `+contents of new line`
 
@@ -71,13 +72,13 @@ Example shape for deleting one line and inserting a new line:
 
 EDIT src/example.rs
  31:agX|
- 32:1as|
+ 32:1af|
  33:z0b|
 -34:daj|
- 35:aaX|
+ 35:aa7|
 +inserted source line
- 36:02v|
- 37:xcv|
+ 36:08W|
+ 37:pcv|
  38:2gs|
 
 The placeholders above are explanatory only. Replace every anchor with the
@@ -102,8 +103,8 @@ ADD src/new_module.rs
 EDIT src/lib.rs
  1:zxs|
 +pub mod new_module;
- 2:0B2|
- 3:ss9|
+ 2:0B4|
+ 3:ss5|
  4:2v0|
 
 DEL src/old_module.rs
