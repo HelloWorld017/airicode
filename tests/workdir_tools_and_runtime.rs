@@ -1,5 +1,6 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
+use airicode::utils::hashline;
 use airicode::{
     core::{
         models::{
@@ -93,7 +94,9 @@ async fn read_and_shell_tools_use_the_shared_workdir_contract() -> Result<()> {
 async fn read_suggests_a_corrected_path_and_grep_accepts_an_empty_path() -> Result<()> {
     let directory = tempdir()?;
     let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
-    workdir.write(Path::new("src/main.rs"), b"needle\n").await?;
+    workdir
+        .write(Path::new("src/main.rs"), b"before\nneedle\nafter\n")
+        .await?;
     let group_id = SessionGroupId::new();
     let session = new_session(airicode::core::models::SessionId::new(group_id), group_id);
     let context = ToolContext {
@@ -126,8 +129,12 @@ async fn read_suggests_a_corrected_path_and_grep_accepts_an_empty_path() -> Resu
             context,
         )
         .await?;
+    let expected = hashline::render("before\nneedle\nafter\n")
+        .into_iter()
+        .find(|line| line.line == 2)
+        .expect("matching line should exist");
     assert!(
-        matches!(output, ToolOutput::Success { content } if content.contains("src/main.rs:1:needle"))
+        matches!(output, ToolOutput::Success { content } if content == format!("./src/main.rs:2:{}|needle", expected.tag))
     );
     Ok(())
 }

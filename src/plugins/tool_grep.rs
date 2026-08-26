@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -12,6 +12,7 @@ use crate::core::{
     },
     registry::PluginRegistryScope,
 };
+use crate::utils::hashline;
 
 #[allow(dead_code)]
 #[derive(JsonSchema)]
@@ -20,6 +21,11 @@ struct GrepInputSchema {
     path: Option<String>,
     glob: Option<String>,
     max_results: Option<usize>,
+}
+
+struct GrepMatch {
+    path: PathBuf,
+    line: usize,
 }
 
 pub struct ToolGrep {
@@ -93,8 +99,7 @@ impl Tool for ToolGrep {
             .unwrap_or(self.max_results)
             .min(self.max_results);
         let mut args = vec![
-            "--line-number".into(),
-            "--no-heading".into(),
+            "--json".into(),
             "--color=never".into(),
             "--hidden".into(),
             "--glob".into(),
@@ -123,7 +128,8 @@ impl Tool for ToolGrep {
             Err(Error::Workdir(message)) => return Ok(ToolOutput::Failure { content: message }),
             Err(error) => return Err(error),
         };
-        if result.status == Some(1) && result.stdout.is_empty() {
+        let matches = parse_matches(&result.stdout);
+        if result.status == Some(1) && matches.is_empty() {
             return Ok(ToolOutput::Failure {
                 content: "no matches".into(),
             });
@@ -137,14 +143,89 @@ impl Tool for ToolGrep {
                 },
             });
         }
-        let mut lines = result.stdout.lines().take(max_results).collect::<Vec<_>>();
-        if result.truncated || result.stdout.lines().count() > max_results {
-            lines.push("[results truncated]");
+
+        let mut rendered_files = HashMap::new();
+        let mut lines = Vec::new();
+        for grep_match in matches.iter().take(max_results) {
+            if context.cancellation.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            if !rendered_files.contains_key(&grep_match.path) {
+                let bytes = match context.workdir.read(&grep_match.path).await {
+                    Ok(bytes) => bytes,
+                    Err(Error::Workdir(message)) => {
+                        return Ok(ToolOutput::Failure { content: message });
+                    }
+                    Err(error) => return Err(error),
+                };
+                if bytes.contains(&0) {
+                    return Ok(ToolOutput::Failure {
+                        content: format!(
+                            "cannot create hashline for binary/NUL-containing input: {}",
+                            grep_match.path.display()
+                        ),
+                    });
+                }
+                let text = std::str::from_utf8(&bytes).map_err(|_| {
+                    Error::Tool(format!(
+                        "cannot create hashline for non-UTF-8 input: {}",
+                        grep_match.path.display()
+                    ))
+                })?;
+                rendered_files.insert(grep_match.path.clone(), hashline::render(text));
+            }
+            let file_lines = rendered_files
+                .get(&grep_match.path)
+                .expect("rendered grep file should be cached");
+            let Some(line) = file_lines.iter().find(|line| line.line == grep_match.line) else {
+                return Ok(ToolOutput::Failure {
+                    content: format!(
+                        "grep result became stale while creating hashline: {}:{}",
+                        grep_match.path.display(),
+                        grep_match.line
+                    ),
+                });
+            };
+            lines.push(format!(
+                "{}:{}:{}|{}",
+                grep_match.path.display(),
+                line.line,
+                line.tag,
+                line.text
+            ));
+        }
+        if result.truncated || matches.len() > max_results {
+            lines.push("[results truncated]".into());
         }
         Ok(ToolOutput::Success {
             content: lines.join("\n"),
         })
     }
+}
+
+fn parse_matches(stdout: &str) -> Vec<GrepMatch> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let event = serde_json::from_str::<Value>(line).ok()?;
+            if event.get("type").and_then(Value::as_str) != Some("match") {
+                return None;
+            }
+            let data = event.get("data")?;
+            let path = data
+                .get("path")
+                .and_then(|path| path.get("text"))
+                .and_then(Value::as_str)?;
+            let line = data
+                .get("line_number")
+                .and_then(Value::as_u64)
+                .and_then(|line| usize::try_from(line).ok())?;
+            Some(GrepMatch {
+                path: PathBuf::from(path),
+                line,
+            })
+        })
+        .collect()
 }
 
 pub struct ToolGrepPlugin {

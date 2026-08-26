@@ -42,8 +42,8 @@ following source lines when present.
 
 Example:
 
-REPLACE src/example.rs FROM 14:241 TO 14:241 <<<EOF
-pub mod ui_state;
+REPLACE src/mod.rs FROM 14:241 TO 15:aC9 <<<EOF
+pub mod replaced;
 EOF
 
 ### INSERT
@@ -62,8 +62,8 @@ The content is inserted immediately before or after the anchored line.
 
 Example:
 
-INSERT src/core/models/mod.rs BEFORE 16:e3b <<<EOF
-pub mod form;
+INSERT src/mod.rs BEFORE 16:e3b <<<EOF
+pub mod new;
 EOF
 
 ### DELETE
@@ -72,33 +72,17 @@ EOF
 
 `DELETE` removes the entire existing file and has no body.
 
+Example:
+
+DELETE src/obsolete.rs
+
 ## Rules
 
 - Read the file before patching and use its hashline output.
-- Never invent, shorten, or recompute an anchor.
+- NEVER invent, shorten, or recompute an anchor.
+  - Instead, use read tool to get the current exact hash.
 - Do not include `|` or the source text in an anchor.
 - Use separate operations for separate ranges.
 - A missing or ambiguous anchor is stale; read the file again and build a new
   patch instead of retrying the old input.
 - Operations are applied in order, so later anchors see earlier operations.
-
-## Complete example
-
-ADD src/core/models/form.rs <<<EOF
-use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct FormState {
-    pub active: usize,
-}
-EOF
-
-REPLACE src/core/models/mod.rs FROM 14:241 TO 14:241 <<<EOF
-pub mod ui_state;
-EOF
-
-INSERT src/core/models/mod.rs BEFORE 16:e3b <<<EOF
-pub mod form;
-EOF
-
-DELETE src/core/models/obsolete.rs
