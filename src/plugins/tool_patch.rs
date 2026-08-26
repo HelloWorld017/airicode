@@ -315,9 +315,7 @@ impl Tool for ToolPatch {
                 },
                 "patch",
             ).await?;
-        }
 
-        if applied_count == 0 {
             Ok(ToolOutput::Failure { content: result })
         } else {
             Ok(ToolOutput::Success { content: result })
