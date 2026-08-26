@@ -123,13 +123,14 @@ impl Tool for ToolRead {
         let start = object
             .get("start_line")
             .and_then(Value::as_u64)
-            .unwrap_or(1) as usize;
+            .unwrap_or(1)
+            .max(1) as usize;
         let end = object
             .get("end_line")
             .and_then(Value::as_u64)
             .map(|value| value as usize)
             .unwrap_or(all.len());
-        if start == 0 || end < start {
+        if end < start {
             let output = ToolOutput::Failure {
                 content: "invalid line range".into(),
             };

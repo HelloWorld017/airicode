@@ -133,7 +133,7 @@ impl Tool for ToolPatch {
                 add_tool_note(
                     &context,
                     NoteContent::Alert {
-                        content: format!("Patch failed: {}", output.content().unwrap_or_default()),
+                        content: format!("Patch failed: {}", message),
                     },
                     "patch",
                 )
