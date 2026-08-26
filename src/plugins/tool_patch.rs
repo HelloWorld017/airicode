@@ -530,7 +530,10 @@ fn detect_conflicts(outcomes: &mut [OperationOutcome]) {
             }
             let conflict = match (&outcomes[previous].edit, &outcomes[current].edit) {
                 (Some(previous), Some(current)) => edits_conflict(previous, current),
-                _ => true,
+                _ => match (outcomes[previous].operation.kind, outcomes[current].operation.kind) {
+                    (OperationKind::Delete, OperationKind::Add) => false,
+                    _ => true,
+                }
             };
             if conflict {
                 outcomes[current].failure = Some(format!(

@@ -36,9 +36,8 @@ EOF
 `TAG`
 
 Anchors use the form `<line>:<3-character-hash>`, without the `|` from the
-`read` output. The range is inclusive. Hashes are matched first; line numbers
-disambiguate repeated hashes. Each hash includes the immediately preceding and
-following source lines when present.
+`read` output. For anchors, use the exact copy from the `read` output.
+The range is inclusive. Hashes are matched first; line numbers disambiguate repeated hashes.
 
 Example:
 
@@ -80,11 +79,8 @@ DELETE src/obsolete.rs
 
 - Read the file before patching and use its hashline output.
 - NEVER invent, shorten, or recompute an anchor.
-  - Instead, use read tool to get the current exact hash.
+  Instead, use read tool to get the current exact hash.
 - Do not include `|` or the source text in an anchor.
 - Use separate operations for separate ranges.
 - A missing or ambiguous anchor is stale; read the file again and build a new
   patch instead of retrying the old input.
-- At the start of a patch call, all referenced files are snapshotted and every
-  anchor is resolved against that snapshot. Later operations do not see edits
-  made by earlier operations in the same call.
