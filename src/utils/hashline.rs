@@ -18,6 +18,29 @@ pub struct Anchor {
 pub fn tag(text: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(text.as_bytes());
+    tag_from_digest(digest)
+}
+
+fn contextual_tag(previous: Option<&str>, current: &str, next: Option<&str>) -> String {
+    hash_tag(&[previous, Some(current), next])
+}
+
+fn hash_tag(parts: &[Option<&str>]) -> String {
+    let mut digest = Sha256::new();
+    for part in parts {
+        match part {
+            Some(part) => {
+                digest.update([1]);
+                digest.update((part.len() as u64).to_be_bytes());
+                digest.update(part.as_bytes());
+            }
+            None => digest.update([0]),
+        }
+    }
+    tag_from_digest(digest)
+}
+
+fn tag_from_digest(digest: Sha256) -> String {
     let digest = digest.finalize();
     let mut value = u16::from_be_bytes([digest[0], digest[1]]);
     let mut tag = [0; 3];
@@ -29,11 +52,19 @@ pub fn tag(text: &str) -> String {
 }
 
 pub fn render(text: &str) -> Vec<HashLine> {
-    text.lines()
+    let lines = text.lines().collect::<Vec<_>>();
+    lines
+        .iter()
         .enumerate()
         .map(|(index, line)| HashLine {
             line: index + 1,
-            tag: tag(line),
+            tag: contextual_tag(
+                index
+                    .checked_sub(1)
+                    .and_then(|index| lines.get(index).copied()),
+                line,
+                lines.get(index + 1).copied(),
+            ),
             text: line.to_string(),
         })
         .collect()
@@ -121,9 +152,22 @@ mod tests {
     #[test]
     fn tags_are_deterministic_and_detect_changes() {
         let first = format("one\ntwo");
-        assert_eq!(first, "1:7ta|one\n2:4FI|two");
-        assert!(verify("one\ntwo", 1, "7ta"));
-        assert!(!verify("ONE\ntwo", 1, "7ta"));
+        let lines = render("one\ntwo");
+        assert_eq!(first, "1:8rg|one\n2:Bll|two");
+        assert!(verify("one\ntwo", 1, &lines[0].tag));
+        assert!(!verify("ONE\ntwo", 1, &lines[0].tag));
+    }
+
+    #[test]
+    fn tags_include_the_adjacent_lines() {
+        let original = render("before\ntarget\nafter");
+        let changed_before = render("changed\ntarget\nafter");
+        let changed_after = render("before\ntarget\nchanged");
+
+        assert_ne!(original[1].tag, changed_before[1].tag);
+        assert_ne!(original[1].tag, changed_after[1].tag);
+        assert_ne!(original[0].tag, changed_before[0].tag);
+        assert_ne!(original[2].tag, changed_after[2].tag);
     }
 
     #[test]

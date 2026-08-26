@@ -37,7 +37,8 @@ EOF
 
 Anchors use the form `<line>:<3-character-hash>`, without the `|` from the
 `read` output. The range is inclusive. Hashes are matched first; line numbers
-disambiguate repeated hashes.
+disambiguate repeated hashes. Each hash includes the immediately preceding and
+following source lines when present.
 
 Example:
 

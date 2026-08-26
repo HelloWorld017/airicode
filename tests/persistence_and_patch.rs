@@ -264,7 +264,9 @@ async fn patch_replaces_a_single_line_without_context_lines() -> Result<()> {
         cancellation: CancellationToken::new(),
     };
     let patch = ToolPatchHashline::new();
-    let target_tag = hashline::tag("three");
+    let target_tag = hashline::render("one\ntwo\nthree\nfour\nfive\n")[2]
+        .tag
+        .clone();
     let replaced = patch
         .execute(
             ToolInput::Text(format!(
@@ -297,6 +299,47 @@ async fn patch_replaces_a_single_line_without_context_lines() -> Result<()> {
         workdir.read(Path::new("short.txt")).await?,
         b"one\nTWO\nthree\n"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn patch_rejects_an_anchor_when_an_adjacent_line_changes() -> Result<()> {
+    let directory = tempdir()?;
+    let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
+    let original = "one\ntwo\nthree\n";
+    workdir
+        .write(Path::new("context.txt"), original.as_bytes())
+        .await?;
+    let tags = hashline::render(original);
+    workdir
+        .write(Path::new("context.txt"), b"ONE\ntwo\nthree\n")
+        .await?;
+    let group_id = SessionGroupId::new();
+    let session = new_session(SessionId::new(group_id), group_id);
+    let context = ToolContext {
+        project_id: airicode::core::models::ProjectId::from_workdir(directory.path()),
+        session_group_id: session.operations.group_id(),
+        session_id: session.operations.session_id(),
+        turn_id: airicode::core::models::TurnId::new(),
+        operations: session.operations.clone(),
+        workdir,
+        cancellation: CancellationToken::new(),
+    };
+    let patch = ToolPatchHashline::new();
+    let result = patch
+        .execute(
+            ToolInput::Text(format!(
+                "REPLACE context.txt FROM {}:{} TO {}:{} <<<EOF\nTWO\nEOF",
+                tags[1].line, tags[1].tag, tags[1].line, tags[1].tag
+            )),
+            context,
+        )
+        .await?;
+
+    assert!(matches!(
+        result,
+        ToolOutput::Failure { content } if content.contains("stale patch")
+    ));
     Ok(())
 }
 
