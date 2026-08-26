@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde_json::Value;
 
+use super::add_output_note;
 use crate::core::{
     error::{Error, Result},
     models::{
@@ -83,9 +84,11 @@ impl Tool for ToolGrep {
             .and_then(Value::as_str)
             .ok_or_else(|| Error::Tool("grep requires pattern".into()))?;
         if pattern.is_empty() {
-            return Ok(ToolOutput::Failure {
+            let output = ToolOutput::Failure {
                 content: "grep pattern cannot be empty".into(),
-            });
+            };
+            add_output_note(&context, "grep", "Search failed", &output).await?;
+            return Ok(output);
         }
         let path = object
             .get("path")
@@ -125,23 +128,43 @@ impl Tool for ToolGrep {
         let result = match result {
             Ok(result) => result,
             Err(Error::Cancelled) => return Err(Error::Cancelled),
-            Err(Error::Workdir(message)) => return Ok(ToolOutput::Failure { content: message }),
+            Err(Error::Workdir(message)) => {
+                let output = ToolOutput::Failure { content: message };
+                add_output_note(&context, "grep", "Search failed", &output).await?;
+                return Ok(output);
+            }
             Err(error) => return Err(error),
         };
         let matches = parse_matches(&result.stdout);
         if result.status == Some(1) && matches.is_empty() {
-            return Ok(ToolOutput::Failure {
+            let output = ToolOutput::Failure {
                 content: "no matches".into(),
-            });
+            };
+            add_output_note(
+                &context,
+                "grep",
+                format!("Searched \"{pattern}\" in {path} - no matches"),
+                &output,
+            )
+            .await?;
+            return Ok(output);
         }
         if result.status != Some(0) {
-            return Ok(ToolOutput::Failure {
+            let output = ToolOutput::Failure {
                 content: if result.stderr.is_empty() {
                     format!("grep exited {:?}", result.status)
                 } else {
                     result.stderr
                 },
-            });
+            };
+            add_output_note(
+                &context,
+                "grep",
+                format!("Search failed for \"{pattern}\" in {path}"),
+                &output,
+            )
+            .await?;
+            return Ok(output);
         }
 
         let mut rendered_files = HashMap::new();
@@ -154,17 +177,21 @@ impl Tool for ToolGrep {
                 let bytes = match context.workdir.read(&grep_match.path).await {
                     Ok(bytes) => bytes,
                     Err(Error::Workdir(message)) => {
-                        return Ok(ToolOutput::Failure { content: message });
+                        let output = ToolOutput::Failure { content: message };
+                        add_output_note(&context, "grep", "Search failed", &output).await?;
+                        return Ok(output);
                     }
                     Err(error) => return Err(error),
                 };
                 if bytes.contains(&0) {
-                    return Ok(ToolOutput::Failure {
+                    let output = ToolOutput::Failure {
                         content: format!(
                             "cannot create hashline for binary/NUL-containing input: {}",
                             grep_match.path.display()
                         ),
-                    });
+                    };
+                    add_output_note(&context, "grep", "Search failed", &output).await?;
+                    return Ok(output);
                 }
                 let text = std::str::from_utf8(&bytes).map_err(|_| {
                     Error::Tool(format!(
@@ -178,13 +205,15 @@ impl Tool for ToolGrep {
                 .get(&grep_match.path)
                 .expect("rendered grep file should be cached");
             let Some(line) = file_lines.iter().find(|line| line.line == grep_match.line) else {
-                return Ok(ToolOutput::Failure {
+                let output = ToolOutput::Failure {
                     content: format!(
                         "grep result became stale while creating hashline: {}:{}",
                         grep_match.path.display(),
                         grep_match.line
                     ),
-                });
+                };
+                add_output_note(&context, "grep", "Search failed", &output).await?;
+                return Ok(output);
             };
             lines.push(format!(
                 "{}:{}:{}|{}",
@@ -197,9 +226,20 @@ impl Tool for ToolGrep {
         if result.truncated || matches.len() > max_results {
             lines.push("[results truncated]".into());
         }
-        Ok(ToolOutput::Success {
+        let output = ToolOutput::Success {
             content: lines.join("\n"),
-        })
+        };
+        add_output_note(
+            &context,
+            "grep",
+            format!(
+                "Searched \"{pattern}\" in {path} - {} matches",
+                matches.len()
+            ),
+            &output,
+        )
+        .await?;
+        Ok(output)
     }
 }
 

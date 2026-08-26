@@ -12,8 +12,8 @@ use super::{
     },
     models::{
         ContextContributionPosition, ContextPriority, ContextSource, FinishReason, Message,
-        MessagePart, MessagePartContent, ProjectId, ProviderEvent, ProviderRequest, Role,
-        RuntimeEvent, SessionGroupId, SessionId, ToolCallId, ToolInput, ToolInputDefinition,
+        MessagePart, MessagePartContent, NoteContent, ProjectId, ProviderEvent, ProviderRequest,
+        Role, RuntimeEvent, SessionGroupId, SessionId, ToolCallId, ToolInput, ToolInputDefinition,
         ToolOutput, TurnId,
     },
     operations::Operations,
@@ -96,6 +96,9 @@ impl TurnEngine {
             request.mode.clone(),
             Some(turn_id),
         );
+        let mut user = user;
+        user.metadata
+            .insert("mode".into(), Value::String(request.mode.clone()));
         let user_for_hook = Arc::new(user.clone());
         for (_, hook) in self.registry.hooks().before_message.clone() {
             hook.before_message(BeforeMessageContext {
@@ -457,6 +460,14 @@ impl TurnEngine {
         call: AssembledCall,
     ) -> Result<(ToolCallId, ToolOutput)> {
         let Some(tool) = self.registry.tool_by_name(&call.name) else {
+            self.operations
+                .add_note(
+                    NoteContent::Alert {
+                        content: format!("Unknown tool: {}", call.name),
+                    },
+                    [("tool".into(), Value::String(call.name.clone()))],
+                )
+                .await?;
             return Ok((
                 call.id,
                 ToolOutput::Failure {
@@ -475,15 +486,14 @@ impl TurnEngine {
         let input = match tool.definition().input {
             ToolInputDefinition::Text => ToolInput::Text(call.arguments),
             ToolInputDefinition::JsonSchema(_) => {
-                    let arguments = call.arguments;
-                    ToolInput::Json(
-                        serde_json::from_str::<Value>(&arguments)
-                            .unwrap_or(Value::String(arguments)),
-                    )
+                let arguments = call.arguments;
+                ToolInput::Json(
+                    serde_json::from_str::<Value>(&arguments).unwrap_or(Value::String(arguments)),
+                )
             }
         };
         let context = super::models::ToolContext {
-            project_id: request.project_id.clone(),
+            project_id: request.project_id,
             session_group_id: request.session_group_id,
             session_id: request.session_id,
             turn_id,
@@ -491,9 +501,21 @@ impl TurnEngine {
             workdir: self.workdir.clone(),
             cancellation: request.cancellation.child_token(),
         };
+        let note_operations = context.operations.clone();
+        let note_tool_name = call.name.clone();
         let output = match tool.execute(input, context).await {
             Ok(output) => output,
-            Err(Error::Tool(message)) => ToolOutput::Failure { content: message },
+            Err(Error::Tool(message)) => {
+                note_operations
+                    .add_note(
+                        NoteContent::Alert {
+                            content: format!("{note_tool_name} failed: {message}"),
+                        },
+                        [("tool".into(), Value::String(note_tool_name))],
+                    )
+                    .await?;
+                ToolOutput::Failure { content: message }
+            }
             Err(error) => return Err(error),
         };
         for (_, hook) in self.registry.hooks().after_tool.clone() {

@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde_json::Value;
 
+use super::add_output_note;
 use crate::core::{
     error::{Error, Result},
     models::{
@@ -79,9 +80,11 @@ impl Tool for ToolFind {
             .and_then(Value::as_str)
             .ok_or_else(|| Error::Tool("find requires name".into()))?;
         if name.is_empty() {
-            return Ok(ToolOutput::Failure {
+            let output = ToolOutput::Failure {
                 content: "find name cannot be empty".into(),
-            });
+            };
+            add_output_note(&context, "find", "Find failed", &output).await?;
+            return Ok(output);
         }
         let path = object
             .get("path")
@@ -123,22 +126,42 @@ impl Tool for ToolFind {
         let result = match result {
             Ok(result) => result,
             Err(Error::Cancelled) => return Err(Error::Cancelled),
-            Err(Error::Workdir(message)) => return Ok(ToolOutput::Failure { content: message }),
+            Err(Error::Workdir(message)) => {
+                let output = ToolOutput::Failure { content: message };
+                add_output_note(&context, "find", "Find failed", &output).await?;
+                return Ok(output);
+            }
             Err(error) => return Err(error),
         };
         if result.status == Some(1) && result.stdout.is_empty() {
-            return Ok(ToolOutput::Failure {
+            let output = ToolOutput::Failure {
                 content: "no files found".into(),
-            });
+            };
+            add_output_note(
+                &context,
+                "find",
+                format!("Found files matching \"{name}\" in {path} - none"),
+                &output,
+            )
+            .await?;
+            return Ok(output);
         }
         if result.status != Some(0) {
-            return Ok(ToolOutput::Failure {
+            let output = ToolOutput::Failure {
                 content: if result.stderr.is_empty() {
                     format!("find exited {:?}", result.status)
                 } else {
                     result.stderr
                 },
-            });
+            };
+            add_output_note(
+                &context,
+                "find",
+                format!("Find failed for \"{name}\" in {path}"),
+                &output,
+            )
+            .await?;
+            return Ok(output);
         }
 
         let mut lines = result
@@ -147,12 +170,21 @@ impl Tool for ToolFind {
             .take(max_results)
             .map(|line| line.strip_prefix("./").unwrap_or(line))
             .collect::<Vec<_>>();
+        let count = lines.len();
         if result.truncated || result.stdout.lines().count() > max_results {
             lines.push("[results truncated]");
         }
-        Ok(ToolOutput::Success {
+        let output = ToolOutput::Success {
             content: lines.join("\n"),
-        })
+        };
+        add_output_note(
+            &context,
+            "find",
+            format!("Found {count} file(s) matching \"{name}\" in {path}"),
+            &output,
+        )
+        .await?;
+        Ok(output)
     }
 }
 

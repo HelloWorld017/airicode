@@ -3,6 +3,7 @@ use std::{path::Path, sync::Arc};
 use async_trait::async_trait;
 use serde_json::Value;
 
+use crate::plugins::add_tool_note;
 use crate::{
     core::{
         error::{Error, Result},
@@ -85,12 +86,32 @@ impl Tool for ToolPatch {
         };
         let operations = match parse_patch(&text) {
             Ok(operations) => operations,
-            Err(message) => return Ok(ToolOutput::Failure { content: message }),
+            Err(message) => {
+                let output = ToolOutput::Failure { content: message };
+                add_tool_note(
+                    &context,
+                    NoteContent::Alert {
+                        content: format!("Patch failed: {}", output.content().unwrap_or_default()),
+                    },
+                    "patch",
+                )
+                .await?;
+                return Ok(output);
+            }
         };
         if operations.is_empty() {
-            return Ok(ToolOutput::Failure {
+            let output = ToolOutput::Failure {
                 content: "patch requires at least one operation".into(),
-            });
+            };
+            add_tool_note(
+                &context,
+                NoteContent::Alert {
+                    content: "Patch failed: patch requires at least one operation".into(),
+                },
+                "patch",
+            )
+            .await?;
+            return Ok(output);
         }
 
         let mut applied = Vec::with_capacity(operations.len());
@@ -98,7 +119,19 @@ impl Tool for ToolPatch {
             match self.apply_operation(operation, &context).await {
                 Ok(value) => applied.push(value),
                 Err(ApplyError::Failure(message)) => {
-                    return Ok(ToolOutput::Failure { content: message });
+                    let output = ToolOutput::Failure { content: message };
+                    add_tool_note(
+                        &context,
+                        NoteContent::Alert {
+                            content: format!(
+                                "Patch failed: {}",
+                                output.content().unwrap_or_default()
+                            ),
+                        },
+                        "patch",
+                    )
+                    .await?;
+                    return Ok(output);
                 }
                 Err(ApplyError::Error(error)) => return Err(error),
             }

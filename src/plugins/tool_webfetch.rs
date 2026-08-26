@@ -14,6 +14,7 @@ use crate::core::{
     },
     registry::PluginRegistryScope,
 };
+use crate::plugins::add_output_note;
 
 #[allow(dead_code)]
 #[derive(JsonSchema)]
@@ -75,9 +76,11 @@ impl Tool for ToolWebfetch {
         let parsed = reqwest::Url::parse(url)
             .map_err(|error| Error::Tool(format!("invalid URL: {error}")))?;
         if !matches!(parsed.scheme(), "http" | "https") {
-            return Ok(ToolOutput::Failure {
+            let output = ToolOutput::Failure {
                 content: "webfetch only supports http and https".into(),
-            });
+            };
+            add_output_note(&context, "webfetch", "Fetch failed", &output).await?;
+            return Ok(output);
         }
         let response = tokio::time::timeout(self.timeout, self.client.get(parsed).send())
             .await
@@ -102,9 +105,25 @@ impl Tool for ToolWebfetch {
         let body = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
         let content = format!("HTTP {status}\n{body}");
         if !status.is_success() {
-            return Ok(ToolOutput::Failure { content });
+            let output = ToolOutput::Failure { content };
+            add_output_note(
+                &context,
+                "webfetch",
+                format!("Fetched {url} - HTTP {status}"),
+                &output,
+            )
+            .await?;
+            return Ok(output);
         }
-        Ok(ToolOutput::Success { content })
+        let output = ToolOutput::Success { content };
+        add_output_note(
+            &context,
+            "webfetch",
+            format!("Fetched {url} - HTTP {status}"),
+            &output,
+        )
+        .await?;
+        Ok(output)
     }
 }
 

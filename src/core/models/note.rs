@@ -10,6 +10,7 @@ pub type NoteMetadata = Metadata;
 pub enum NoteContent {
     Info { content: String },
     Alert { content: String },
+    Subtle { content: String },
     Diff { file: String, content: String },
 }
 

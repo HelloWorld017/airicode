@@ -12,6 +12,7 @@ use crate::core::{
     },
     registry::PluginRegistryScope,
 };
+use crate::{core::models::NoteContent, plugins::add_tool_note};
 
 #[allow(dead_code)]
 #[derive(JsonSchema)]
@@ -63,9 +64,18 @@ impl Tool for ToolQuestion {
             .cloned()
             .unwrap_or_default();
         if choices.iter().any(|choice| !choice.is_string()) {
-            return Ok(ToolOutput::Failure {
+            let output = ToolOutput::Failure {
                 content: "question choices must be strings".into(),
-            });
+            };
+            add_tool_note(
+                &context,
+                NoteContent::Alert {
+                    content: output.content().unwrap_or("Question failed").into(),
+                },
+                "question",
+            )
+            .await?;
+            return Ok(output);
         }
         context
             .operations
@@ -78,6 +88,18 @@ impl Tool for ToolQuestion {
                 }),
             )
             .await?;
+        let choices_text = choices
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|choice| format!("- {choice}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content = if choices_text.is_empty() {
+            question.to_string()
+        } else {
+            format!("{question}\n\n{choices_text}")
+        };
+        add_tool_note(&context, NoteContent::Info { content }, "question").await?;
         Ok(ToolOutput::Stop)
     }
 }

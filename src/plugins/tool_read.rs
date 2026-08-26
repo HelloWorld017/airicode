@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde_json::Value;
 
+use crate::plugins::add_output_note;
 use crate::{
     core::{
         error::{Error, Result},
@@ -93,19 +94,25 @@ impl Tool for ToolRead {
                     }
                     _ => message,
                 };
-                return Ok(ToolOutput::Failure { content });
+                let output = ToolOutput::Failure { content };
+                add_output_note(&context, "read", "Read failed", &output).await?;
+                return Ok(output);
             }
             Err(error) => return Err(error),
         };
         if bytes.contains(&0) {
-            return Ok(ToolOutput::Failure {
+            let output = ToolOutput::Failure {
                 content: "cannot read binary/NUL-containing input".into(),
-            });
+            };
+            add_output_note(&context, "read", "Read failed", &output).await?;
+            return Ok(output);
         }
         if bytes.len() > self.max_bytes {
-            return Ok(ToolOutput::Failure {
+            let output = ToolOutput::Failure {
                 content: format!("file exceeds read limit of {} bytes", self.max_bytes),
-            });
+            };
+            add_output_note(&context, "read", "Read failed", &output).await?;
+            return Ok(output);
         }
         if context.cancellation.is_cancelled() {
             return Err(Error::Cancelled);
@@ -123,14 +130,18 @@ impl Tool for ToolRead {
             .map(|value| value as usize)
             .unwrap_or(all.len());
         if start == 0 || end < start {
-            return Ok(ToolOutput::Failure {
+            let output = ToolOutput::Failure {
                 content: "invalid line range".into(),
-            });
+            };
+            add_output_note(&context, "read", "Read failed", &output).await?;
+            return Ok(output);
         }
         if end - start + 1 > self.max_lines {
-            return Ok(ToolOutput::Failure {
+            let output = ToolOutput::Failure {
                 content: format!("line range exceeds read limit of {} lines", self.max_lines),
-            });
+            };
+            add_output_note(&context, "read", "Read failed", &output).await?;
+            return Ok(output);
         }
         let selected = all
             .into_iter()
@@ -138,7 +149,16 @@ impl Tool for ToolRead {
             .map(|line| format!("{}:{}|{}", line.line, line.tag, line.text))
             .collect::<Vec<_>>()
             .join("\n");
-        Ok(ToolOutput::Success { content: selected })
+        let range = if let Some(end) = object.get("end_line").and_then(Value::as_u64) {
+            format!(":{start}-{end}")
+        } else if start > 1 {
+            format!(":{start}-")
+        } else {
+            String::new()
+        };
+        let output = ToolOutput::Success { content: selected };
+        add_output_note(&context, "read", format!("Read {path}{range}"), &output).await?;
+        Ok(output)
     }
 }
 

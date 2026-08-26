@@ -8,6 +8,7 @@ use crate::core::{
     },
     registry::PluginRegistryScope,
 };
+use crate::{core::models::NoteContent, plugins::add_tool_note};
 use async_trait::async_trait;
 
 pub struct ToolShell {
@@ -51,7 +52,7 @@ impl Tool for ToolShell {
         #[cfg(windows)]
         let spec = CommandSpec {
             program: "cmd".into(),
-            args: vec!["/C".into(), command],
+            args: vec!["/C".into(), command.clone()],
             cwd: None,
             env: Default::default(),
             max_output_bytes: self.max_output_bytes,
@@ -59,15 +60,34 @@ impl Tool for ToolShell {
         #[cfg(not(windows))]
         let spec = CommandSpec {
             program: "sh".into(),
-            args: vec!["-c".into(), command],
+            args: vec!["-c".into(), command.clone()],
             cwd: None,
             env: Default::default(),
             max_output_bytes: self.max_output_bytes,
         };
-        let result = context
+        let result = match context
             .workdir
             .execute(spec, context.cancellation.clone())
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(Error::Cancelled) => return Err(Error::Cancelled),
+            Err(Error::Workdir(message)) => {
+                let output = ToolOutput::Failure {
+                    content: message.clone(),
+                };
+                add_tool_note(
+                    &context,
+                    NoteContent::Alert {
+                        content: format!("# {command}\n\n{message}"),
+                    },
+                    "shell",
+                )
+                .await?;
+                return Ok(output);
+            }
+            Err(error) => return Err(error),
+        };
         let mut content = String::new();
         if !result.stdout.is_empty() {
             content.push_str(&result.stdout);
@@ -85,9 +105,26 @@ impl Tool for ToolShell {
             .status
             .map_or_else(|| "signal".into(), |status| status.to_string());
         let content = format!("exit {status}\n{content}");
+        let note_content = format!("# {command}\n\n$ {command}\n\n{content}");
         if result.status == Some(0) {
+            add_tool_note(
+                &context,
+                NoteContent::Info {
+                    content: note_content,
+                },
+                "shell",
+            )
+            .await?;
             Ok(ToolOutput::Success { content })
         } else {
+            add_tool_note(
+                &context,
+                NoteContent::Alert {
+                    content: note_content,
+                },
+                "shell",
+            )
+            .await?;
             Ok(ToolOutput::Failure { content })
         }
     }

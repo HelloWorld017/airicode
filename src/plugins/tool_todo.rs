@@ -13,6 +13,7 @@ use crate::core::{
     },
     registry::PluginRegistryScope,
 };
+use crate::{core::models::NoteContent, plugins::add_tool_note};
 
 #[allow(dead_code)]
 #[derive(JsonSchema)]
@@ -93,9 +94,18 @@ impl Tool for ToolTodo {
                 status,
                 "pending" | "in_progress" | "completed" | "cancelled"
             ) {
-                return Ok(ToolOutput::Failure {
+                let output = ToolOutput::Failure {
                     content: format!("invalid todo status: {status}"),
-                });
+                };
+                add_tool_note(
+                    &context,
+                    NoteContent::Alert {
+                        content: output.content().unwrap_or("Todo update failed").into(),
+                    },
+                    "todo",
+                )
+                .await?;
+                return Ok(output);
             }
             normalized.push(TodoItem {
                 content: content.into(),
@@ -108,6 +118,27 @@ impl Tool for ToolTodo {
             .operations
             .update_plugin_state("todo", value)
             .await?;
+        let content = normalized
+            .iter()
+            .map(|todo| {
+                let marker = match todo.status.as_str() {
+                    "completed" => "x",
+                    "cancelled" => "-",
+                    "in_progress" => ">",
+                    _ => " ",
+                };
+                format!("- [{marker}] {}", todo.content)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        add_tool_note(
+            &context,
+            NoteContent::Info {
+                content: format!("Todo list ({} items)\n\n{content}", normalized.len()),
+            },
+            "todo",
+        )
+        .await?;
         Ok(ToolOutput::Success {
             content: format!("Updated todo list ({} items)", normalized.len()),
         })
