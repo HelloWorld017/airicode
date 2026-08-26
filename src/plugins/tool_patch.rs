@@ -255,12 +255,23 @@ impl Tool for ToolPatch {
             }
         }
 
-        for outcome in outcomes.iter().filter(|outcome| outcome.applied) {
-            let Some(plan) = plans.get(&outcome.operation.path) else {
-                continue;
-            };
+        let applied_plan_by_path = outcomes
+            .iter()
+            .filter(|outcome| outcome.applied)
+            .fold(
+                HashMap::new(),
+                |mut acc, outcome| match plans.get(&outcome.operation.path) {
+                    Some(plan) => {
+                        acc.entry(outcome.operation.path.clone()).or_insert(plan);
+                        acc
+                    },
+                    _ => acc
+                }
+            );
+
+        for (path, plan) in applied_plan_by_path.iter() {
             let diff = unified_diff(
-                &outcome.operation.path,
+                path,
                 plan.old_content.as_deref().unwrap_or_default(),
                 plan.content.as_deref().unwrap_or_default(),
             );
@@ -268,31 +279,46 @@ impl Tool for ToolPatch {
                 .operations
                 .add_note(
                     NoteContent::Diff {
-                        file: outcome.operation.path.clone(),
+                        file: path.clone(),
                         content: diff,
                     },
                     [
                         ("tool".into(), Value::String("patch".into())),
-                        (
-                            "operation".into(),
-                            Value::String(operation_name(outcome.operation.kind).into()),
-                        ),
                     ],
                 )
                 .await?;
         }
 
-        if applied_count == 0 {
-            let output = ToolOutput::Failure { content: result };
+        if applied_count < outcomes.len() {
+            let failed_summary = outcomes
+                .iter()
+                .filter(|outcome| !outcome.applied)
+                .fold(
+                    "Patch failed:\n".to_string(),
+                    |mut body, outcome| {
+                        let reason = match outcome.failure.as_ref() {
+                            Some(failure) => &format!(": {}", failure),
+                            None => ""
+                        };
+
+                        body.push_str(&outcome.operation.path);
+                        body.push_str(reason);
+                        body.push('\n');
+                        body
+                    }
+                );
+
             add_tool_note(
                 &context,
                 NoteContent::Alert {
-                    content: format!("Patch failed: {}", output.content().unwrap_or_default()),
+                    content: failed_summary,
                 },
                 "patch",
-            )
-            .await?;
-            Ok(output)
+            ).await?;
+        }
+
+        if applied_count == 0 {
+            Ok(ToolOutput::Failure { content: result })
         } else {
             Ok(ToolOutput::Success { content: result })
         }
@@ -926,16 +952,6 @@ fn operation_display(operation: &Operation) -> String {
 
 fn format_anchor(anchor: &hashline::Anchor) -> String {
     format!("{}:{}", anchor.line, anchor.tag)
-}
-
-fn operation_name(kind: OperationKind) -> &'static str {
-    match kind {
-        OperationKind::Add => "add",
-        OperationKind::Delete => "delete",
-        OperationKind::Replace => "replace",
-        OperationKind::InsertBefore => "insert_before",
-        OperationKind::InsertAfter => "insert_after",
-    }
 }
 
 fn parse_patch(text: &str) -> std::result::Result<Vec<Operation>, String> {
