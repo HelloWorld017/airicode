@@ -85,4 +85,6 @@ DELETE src/obsolete.rs
 - Use separate operations for separate ranges.
 - A missing or ambiguous anchor is stale; read the file again and build a new
   patch instead of retrying the old input.
-- Operations are applied in order, so later anchors see earlier operations.
+- At the start of a patch call, all referenced files are snapshotted and every
+  anchor is resolved against that snapshot. Later operations do not see edits
+  made by earlier operations in the same call.

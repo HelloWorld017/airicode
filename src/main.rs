@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 use airicode::{
     core::{project_from_path, CoreBuilder, SessionGroupId},
     plugins::{
-        InstructionBasePlugin, OpenAiProviderPlugin, PersistencePlugin, ToolFindPlugin,
+        InstructionBasePlugin, OpenAiProviderPlugin, PersistencePlugin, ToolFindFilePlugin,
         ToolGrepPlugin, ToolPatchPlugin, ToolQuestionPlugin, ToolReadPlugin, ToolShellPlugin,
         ToolTodoPlugin, ToolWebfetchPlugin,
     },
@@ -29,7 +29,7 @@ async fn main() -> airicode::Result<()> {
         .plugin(Arc::new(ToolShellPlugin::new()))
         .plugin(Arc::new(ToolPatchPlugin::new()))
         .plugin(Arc::new(ToolGrepPlugin::new()))
-        .plugin(Arc::new(ToolFindPlugin::new()))
+        .plugin(Arc::new(ToolFindFilePlugin::new()))
         .plugin(Arc::new(ToolTodoPlugin::new()))
         .plugin(Arc::new(ToolQuestionPlugin::new()))
         .plugin(Arc::new(ToolWebfetchPlugin::new()))

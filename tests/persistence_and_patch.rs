@@ -154,9 +154,13 @@ async fn patch_revalidates_hashline_and_stores_full_diff_as_note() -> Result<()>
             context.clone(),
         )
         .await?;
-    assert!(
-        matches!(first, ToolOutput::Success { content } if content.contains("Replaced main.rs"))
-    );
+    assert!(matches!(
+        first,
+        ToolOutput::Success { content }
+            if content.contains("Success: Applied 1 operations.")
+                && content.contains("[1] APPLIED \"REPLACE main.rs")
+                && content.contains("Updated file:")
+    ));
     assert_eq!(
         workdir.read(Path::new("main.rs")).await?,
         b"one\nTWO\nthree\n"
@@ -171,7 +175,13 @@ async fn patch_revalidates_hashline_and_stores_full_diff_as_note() -> Result<()>
             context,
         )
         .await?;
-    assert!(matches!(stale, ToolOutput::Failure { content } if content.contains("stale patch")));
+    assert!(matches!(
+        stale,
+        ToolOutput::Failure { content }
+            if content.contains("Failure: Applied 0 of 1 operations.")
+                && content.contains("Anchor is stale")
+                && content.contains("Current file:")
+    ));
     Ok(())
 }
 
@@ -338,7 +348,10 @@ async fn patch_rejects_an_anchor_when_an_adjacent_line_changes() -> Result<()> {
 
     assert!(matches!(
         result,
-        ToolOutput::Failure { content } if content.contains("stale patch")
+        ToolOutput::Failure { content }
+            if content.contains("Failure: Applied 0 of 1 operations.")
+                && content.contains("Anchor is stale")
+                && content.contains("Current file:")
     ));
     Ok(())
 }
@@ -381,5 +394,235 @@ async fn patch_inserts_literal_heredoc_content_before_and_after() -> Result<()> 
         workdir.read(Path::new("lines.txt")).await?,
         b"one\nbefore\n\n+literal\n-minus\ntwo\nthree\nafter\n"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn patch_resolves_all_anchors_from_one_snapshot_and_returns_fresh_hashlines() -> Result<()> {
+    let directory = tempdir()?;
+    let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
+    let original = "one\ntwo\nthree\nfour\n";
+    workdir
+        .write(Path::new("lines.txt"), original.as_bytes())
+        .await?;
+    let tags = hashline::render(original);
+    let group_id = SessionGroupId::new();
+    let session = new_session(SessionId::new(group_id), group_id);
+    let context = ToolContext {
+        project_id: airicode::core::models::ProjectId::from_workdir(directory.path()),
+        session_group_id: session.operations.group_id(),
+        session_id: session.operations.session_id(),
+        turn_id: airicode::core::models::TurnId::new(),
+        operations: session.operations,
+        workdir: workdir.clone(),
+        cancellation: CancellationToken::new(),
+    };
+
+    let result = ToolPatch::new()
+        .execute(
+            ToolInput::Text(format!(
+                "REPLACE lines.txt FROM {}:{} TO {}:{} <<<ONE\nTWO\nONE\nREPLACE lines.txt FROM {}:{} TO {}:{} <<<TWO\nFOUR\nTWO",
+                tags[1].line,
+                tags[1].tag,
+                tags[1].line,
+                tags[1].tag,
+                tags[3].line,
+                tags[3].tag,
+                tags[3].line,
+                tags[3].tag,
+            )),
+            context,
+        )
+        .await?;
+    let fresh = hashline::render("one\nTWO\nthree\nFOUR\n");
+    assert!(matches!(
+        result,
+        ToolOutput::Success { content }
+            if content.contains("Success: Applied 2 operations.")
+                && content.contains(&format!("2:{}|TWO", fresh[1].tag))
+                && content.contains(&format!("4:{}|FOUR", fresh[3].tag))
+    ));
+    assert_eq!(
+        workdir.read(Path::new("lines.txt")).await?,
+        b"one\nTWO\nthree\nFOUR\n"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn patch_reports_overlapping_operations_as_partial_failure() -> Result<()> {
+    let directory = tempdir()?;
+    let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
+    let original = "one\ntwo\nthree\n";
+    workdir
+        .write(Path::new("lines.txt"), original.as_bytes())
+        .await?;
+    let tags = hashline::render(original);
+    let group_id = SessionGroupId::new();
+    let session = new_session(SessionId::new(group_id), group_id);
+    let context = ToolContext {
+        project_id: airicode::core::models::ProjectId::from_workdir(directory.path()),
+        session_group_id: session.operations.group_id(),
+        session_id: session.operations.session_id(),
+        turn_id: airicode::core::models::TurnId::new(),
+        operations: session.operations,
+        workdir: workdir.clone(),
+        cancellation: CancellationToken::new(),
+    };
+    let result = ToolPatch::new()
+        .execute(
+            ToolInput::Text(format!(
+                "REPLACE lines.txt FROM {}:{} TO {}:{} <<<ONE\nTWO\nONE\nREPLACE lines.txt FROM {}:{} TO {}:{} <<<TWO\nOTHER\nTWO",
+                tags[1].line,
+                tags[1].tag,
+                tags[1].line,
+                tags[1].tag,
+                tags[1].line,
+                tags[1].tag,
+                tags[1].line,
+                tags[1].tag,
+            )),
+            context,
+        )
+        .await?;
+    assert!(matches!(
+        result,
+        ToolOutput::Success { content }
+            if content.contains("Partial Failure: Applied 1 of 2 operations.")
+                && content.contains("[2] FAILED")
+                && content.contains("conflicts with operation [1]")
+    ));
+    assert_eq!(
+        workdir.read(Path::new("lines.txt")).await?,
+        b"one\nTWO\nthree\n"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn patch_applies_other_operations_when_one_anchor_is_stale() -> Result<()> {
+    let directory = tempdir()?;
+    let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
+    workdir
+        .write(Path::new("existing.txt"), b"one\ntwo\n")
+        .await?;
+    let group_id = SessionGroupId::new();
+    let session = new_session(SessionId::new(group_id), group_id);
+    let context = ToolContext {
+        project_id: airicode::core::models::ProjectId::from_workdir(directory.path()),
+        session_group_id: session.operations.group_id(),
+        session_id: session.operations.session_id(),
+        turn_id: airicode::core::models::TurnId::new(),
+        operations: session.operations,
+        workdir: workdir.clone(),
+        cancellation: CancellationToken::new(),
+    };
+
+    let result = ToolPatch::new()
+        .execute(
+            ToolInput::Text(
+                "REPLACE existing.txt FROM 1:bad TO 1:bad <<<STALE\nignored\nSTALE\nADD created.txt <<<ADD\ncreated\nADD"
+                    .into(),
+            ),
+            context,
+        )
+        .await?;
+    assert!(matches!(
+        result,
+        ToolOutput::Success { content }
+            if content.contains("Partial Failure: Applied 1 of 2 operations.")
+                && content.contains("[1] FAILED")
+                && content.contains("[2] APPLIED \"ADD created.txt\"")
+                && content.contains("Anchor is stale (1:bad).")
+    ));
+    assert_eq!(workdir.read(Path::new("created.txt")).await?, b"created\n");
+    Ok(())
+}
+
+#[tokio::test]
+async fn patch_failure_context_merges_windows_and_large_updates_are_collapsed() -> Result<()> {
+    let directory = tempdir()?;
+    let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
+    let original = (1..=12)
+        .map(|line| format!("line-{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    workdir
+        .write(Path::new("lines.txt"), original.as_bytes())
+        .await?;
+    let group_id = SessionGroupId::new();
+    let session = new_session(SessionId::new(group_id), group_id);
+    let context = ToolContext {
+        project_id: airicode::core::models::ProjectId::from_workdir(directory.path()),
+        session_group_id: session.operations.group_id(),
+        session_id: session.operations.session_id(),
+        turn_id: airicode::core::models::TurnId::new(),
+        operations: session.operations,
+        workdir: workdir.clone(),
+        cancellation: CancellationToken::new(),
+    };
+    let patch = ToolPatch::new();
+    let stale = patch
+        .execute(
+            ToolInput::Text(
+                "REPLACE lines.txt FROM 2:bad TO 10:wrs <<<STALE\nignored\nSTALE".into(),
+            ),
+            context.clone(),
+        )
+        .await?;
+    assert!(matches!(
+        stale,
+        ToolOutput::Failure { content }
+            if content.contains("Start anchor is stale (2:bad).")
+                && content.contains("End anchor is stale (10:wrs).")
+                && content.contains("... 5 line(s) omitted ...")
+    ));
+
+    let tags = hashline::render(&original);
+    let updated = patch
+        .execute(
+            ToolInput::Text(format!(
+                "REPLACE lines.txt FROM {}:{} TO {}:{} <<<MANY\na\nb\nc\nd\ne\nf\ng\nMANY",
+                tags[1].line, tags[1].tag, tags[8].line, tags[8].tag
+            )),
+            context,
+        )
+        .await?;
+    assert!(matches!(
+        updated,
+        ToolOutput::Success { content }
+            if content.contains("... 1 line(s) omitted ...")
+                && content.contains("|a")
+                && content.contains("|g")
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn patch_syntax_errors_include_expected_format() -> Result<()> {
+    let directory = tempdir()?;
+    let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
+    let group_id = SessionGroupId::new();
+    let session = new_session(SessionId::new(group_id), group_id);
+    let context = ToolContext {
+        project_id: airicode::core::models::ProjectId::from_workdir(directory.path()),
+        session_group_id: session.operations.group_id(),
+        session_id: session.operations.session_id(),
+        turn_id: airicode::core::models::TurnId::new(),
+        operations: session.operations,
+        workdir,
+        cancellation: CancellationToken::new(),
+    };
+    let result = ToolPatch::new()
+        .execute(ToolInput::Text("REPLACE missing syntax".into()), context)
+        .await?;
+    assert!(matches!(
+        result,
+        ToolOutput::Failure { content }
+            if content.contains("Patch syntax error:")
+                && content.contains("Expected format:")
+                && content.contains("REPLACE path FROM line:hash TO line:hash")
+    ));
     Ok(())
 }

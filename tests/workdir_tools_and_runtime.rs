@@ -12,7 +12,7 @@ use airicode::{
         workdir::{NativeWorkdir, Workdir},
         Tool,
     },
-    plugins::{ToolFind, ToolGrep, ToolRead, ToolReadPlugin, ToolShell, ToolShellPlugin},
+    plugins::{ToolFindFile, ToolGrep, ToolRead, ToolReadPlugin, ToolShell, ToolShellPlugin},
     Result,
 };
 use serde_json::json;
@@ -140,10 +140,12 @@ async fn read_suggests_a_corrected_path_and_grep_accepts_an_empty_path() -> Resu
 }
 
 #[tokio::test]
-async fn find_returns_exact_workdir_relative_file_paths() -> Result<()> {
+async fn find_file_supports_exact_keyword_and_glob_queries() -> Result<()> {
     let directory = tempdir()?;
-    std::fs::create_dir(directory.path().join("src"))?;
+    std::fs::create_dir_all(directory.path().join("src/models"))?;
     std::fs::write(directory.path().join("src/main.rs"), "fn main() {}")?;
+    std::fs::write(directory.path().join("src/models/Message.rs"), "model")?;
+    std::fs::write(directory.path().join("README.md"), "readme")?;
     let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
     let group_id = SessionGroupId::new();
     let session = new_session(airicode::core::models::SessionId::new(group_id), group_id);
@@ -157,11 +159,67 @@ async fn find_returns_exact_workdir_relative_file_paths() -> Result<()> {
         cancellation: CancellationToken::new(),
     };
 
-    let find = ToolFind::new();
+    let find = ToolFindFile::new();
     let output = find
-        .execute(ToolInput::Json(json!({ "name": "main.rs" })), context)
+        .execute(
+            ToolInput::Json(json!({
+                "query": { "kind": "by_filename_exact", "filename": "main.rs" }
+            })),
+            context.clone(),
+        )
         .await?;
     assert!(matches!(output, ToolOutput::Success { content } if content == "src/main.rs"));
+
+    let output = find
+        .execute(
+            ToolInput::Json(json!({
+                "query": { "kind": "by_filename_keyword", "keyword": "MESSAGE" },
+                "path": "src"
+            })),
+            context.clone(),
+        )
+        .await?;
+    assert!(
+        matches!(output, ToolOutput::Success { content } if content == "src/models/Message.rs")
+    );
+
+    let output = find
+        .execute(
+            ToolInput::Json(json!({
+                "query": { "kind": "by_glob_pattern", "pattern": "src/**/*.rs" }
+            })),
+            context.clone(),
+        )
+        .await?;
+    assert!(
+        matches!(output, ToolOutput::Success { content } if content == "src/main.rs\nsrc/models/Message.rs")
+    );
+
+    let limited = ToolFindFile::new().with_limits(1, 128 * 1024);
+    let output = limited
+        .execute(
+            ToolInput::Json(json!({
+                "query": { "kind": "by_filename_keyword", "keyword": ".rs" }
+            })),
+            context.clone(),
+        )
+        .await?;
+    assert!(matches!(
+        output,
+        ToolOutput::Success { content }
+            if content.starts_with("src/main.rs\n")
+                && content.contains("Showing 1 of 2 matching files.")
+    ));
+
+    let output = find
+        .execute(
+            ToolInput::Json(json!({
+                "query": { "kind": "by_filename_exact", "filename": "missing.txt" }
+            })),
+            context,
+        )
+        .await?;
+    assert!(matches!(output, ToolOutput::Success { content } if content == "No files matched."));
     Ok(())
 }
 
