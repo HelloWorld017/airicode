@@ -6,7 +6,7 @@ pub mod native_workdir {
 }
 pub mod tool_find;
 pub mod tool_grep;
-pub mod tool_patch_hashline;
+pub mod tool_patch;
 pub mod tool_question;
 pub mod tool_read;
 pub mod tool_shell;
@@ -23,7 +23,7 @@ pub use provider_openai::{
 };
 pub use tool_find::{ToolFind, ToolFindPlugin};
 pub use tool_grep::{ToolGrep, ToolGrepPlugin};
-pub use tool_patch_hashline::{ToolPatchHashline, ToolPatchHashlinePlugin};
+pub use tool_patch::{ToolPatch, ToolPatchPlugin};
 pub use tool_question::{ToolQuestion, ToolQuestionPlugin};
 pub use tool_read::{ToolRead, ToolReadPlugin};
 pub use tool_shell::{ToolShell, ToolShellPlugin};

@@ -11,7 +11,7 @@ use airicode::{
         workdir::{NativeWorkdir, Workdir},
         Tool,
     },
-    plugins::{JsonlSessionStore, ToolPatchHashline},
+    plugins::{JsonlSessionStore, ToolPatch},
     utils::hashline,
     Result,
 };
@@ -144,7 +144,7 @@ async fn patch_revalidates_hashline_and_stores_full_diff_as_note() -> Result<()>
         cancellation: CancellationToken::new(),
     };
     let tags = hashline::render("one\ntwo\nthree\n");
-    let patch = ToolPatchHashline::new();
+    let patch = ToolPatch::new();
     let first = patch
         .execute(
             ToolInput::Text(format!(
@@ -190,7 +190,7 @@ async fn patch_supports_add_delete_and_line_disambiguation() -> Result<()> {
         workdir: workdir.clone(),
         cancellation: CancellationToken::new(),
     };
-    let patch = ToolPatchHashline::new();
+    let patch = ToolPatch::new();
     assert!(matches!(
         patch
             .execute(
@@ -263,7 +263,7 @@ async fn patch_replaces_a_single_line_without_context_lines() -> Result<()> {
         workdir: workdir.clone(),
         cancellation: CancellationToken::new(),
     };
-    let patch = ToolPatchHashline::new();
+    let patch = ToolPatch::new();
     let target_tag = hashline::render("one\ntwo\nthree\nfour\nfive\n")[2]
         .tag
         .clone();
@@ -325,7 +325,7 @@ async fn patch_rejects_an_anchor_when_an_adjacent_line_changes() -> Result<()> {
         workdir,
         cancellation: CancellationToken::new(),
     };
-    let patch = ToolPatchHashline::new();
+    let patch = ToolPatch::new();
     let result = patch
         .execute(
             ToolInput::Text(format!(
@@ -363,7 +363,7 @@ async fn patch_inserts_literal_heredoc_content_before_and_after() -> Result<()> 
         cancellation: CancellationToken::new(),
     };
     let lines = hashline::render(original);
-    let patch = ToolPatchHashline::new();
+    let patch = ToolPatch::new();
     let result = patch
         .execute(
             ToolInput::Text(format!(
