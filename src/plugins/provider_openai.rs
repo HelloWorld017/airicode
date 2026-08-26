@@ -39,12 +39,6 @@ impl OpenAiProvider {
         }
     }
 
-    pub fn from_env(id: ProviderId) -> Result<Self> {
-        let key = std::env::var("OPENAI_API_KEY")
-            .map_err(|_| Error::Config("OPENAI_API_KEY is not set".into()))?;
-        Ok(Self::new(id, key))
-    }
-
     pub fn with_base_url(self, base_url: impl Into<String>) -> Self {
         self.set_base_url(base_url);
         self
