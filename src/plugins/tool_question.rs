@@ -43,7 +43,7 @@ impl Tool for ToolQuestion {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "question".into(),
-            description: "Ask the user for information that the agent cannot safely infer. Provide the question and optional string choices. The question is stored as pending UI/plugin state and this tool returns Stop, ending the current provider turn without cancellation; the user's next response starts a normal new turn.".into(),
+            description: "Ask the user for information that the agent cannot safely infer. Provide the question and optional string choices.".into(),
             input: ToolInputDefinition::JsonSchema(
                 crate::utils::schema::json_schema::<QuestionInputSchema>(),
             ),

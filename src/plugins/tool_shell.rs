@@ -41,7 +41,7 @@ impl Tool for ToolShell {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "shell".into(),
-            description: "Execute raw shell command text in the current workdir. Pass a string, not a JSON object. The command runs through the Workdir abstraction so its root, worktree, and sandbox layers are respected. The result includes the exit status and captured stdout/stderr; a non-zero exit status is a tool failure, and cancellation stops the process when supported.".into(),
+            description: "Execute raw shell command text in the current workdir. Pass a string, not a JSON object. The command runs through the Workdir abstraction so its root, worktree, and sandbox layers are respected. The result includes the exit status and captured stdout/stderr; a non-zero exit status is a tool failure.".into(),
             input: ToolInputDefinition::Text,
         }
     }
