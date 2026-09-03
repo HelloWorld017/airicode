@@ -6,7 +6,7 @@ use airicode::{
         CoreBuilder, Plugin, SessionHandle, Tool,
         models::{
             ContextPriority, Message, MessagePart, PluginId, ProviderId, Role, SessionGroupId,
-            SessionId, SessionState, ToolContext, ToolOutput, TurnId,
+            SessionId, SessionState, ToolContext, ToolOutput, TurnId, UIState,
         },
         persistence::SessionStore,
         project_from_path,
@@ -88,7 +88,7 @@ async fn jsonl_store_replays_and_recovers_an_incomplete_tail() -> Result<()> {
         .append(true)
         .open(&log)
         .await?;
-    partial.write_all(b"{\"schema_version\":1").await?;
+    partial.write_all(b"{\"schema_version\":2").await?;
     partial.flush().await?;
     assert_eq!(persisted.load(session_id).await?.len(), 1);
     let next = airicode::core::models::SessionCommit::new(
@@ -128,6 +128,30 @@ async fn persisted_session_actor_does_not_advance_when_append_fails() -> Result<
             .is_ok()
     );
     assert_eq!(session.operations().snapshot().await?.last_sequence, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn ui_state_survives_jsonl_replay() -> Result<()> {
+    let directory = tempdir()?;
+    let group_id = SessionGroupId::new();
+    let session_id = SessionId::new(group_id);
+    let store = JsonlSessionStore::new_at(directory.path().join("ui-state"));
+    let session = spawn_session(
+        &directory,
+        SessionState::new(session_id, group_id),
+        Some(Arc::new(store.clone())),
+    )
+    .await?;
+    let ui = UIState {
+        selected_model: None,
+        selected_mode: Some("plan".into()),
+        selected_variant: Some("review".into()),
+    };
+
+    session.operations().update_ui_state(ui.clone()).await?;
+    let replayed = SessionState::replay(session_id, group_id, store.load(session_id).await?)?;
+    assert_eq!(replayed.ui, ui);
     Ok(())
 }
 

@@ -19,7 +19,7 @@ use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::Mutex};
 
 pub use crate::core::persistence::SessionStore;
 
-pub const SESSION_LOG_SCHEMA_VERSION: u32 = 1;
+pub const SESSION_LOG_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionLogRecord {

@@ -12,6 +12,7 @@ pub mod session;
 pub mod session_group;
 pub mod shell_action;
 pub mod tool;
+pub mod ui_event;
 pub mod ui_state;
 pub mod workdir;
 
@@ -30,5 +31,6 @@ pub use session::*;
 pub use session_group::*;
 pub use shell_action::*;
 pub use tool::*;
+pub use ui_event::*;
 pub use ui_state::*;
 pub use workdir::*;

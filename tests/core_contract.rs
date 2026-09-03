@@ -6,7 +6,7 @@ use airicode::core::{
         ContextPriority, ContextSource, Message, MessagePart, Role, SessionGroupId, SessionId,
         SessionMutation, SessionState, ShellAction, ShellActionContext, ShellActionDefinition,
         ShellActionId, ShellActionInput, ToolDefinition, ToolId, ToolInput, ToolInputDefinition,
-        ToolOutput,
+        ToolOutput, UIEvent, UIState,
     },
     project_from_path,
     registry::Registry,
@@ -126,6 +126,36 @@ async fn actor_commits_message_and_context_as_one_operation() -> airicode::Resul
     assert!(state.messages.contains_key(&message_id));
     assert!(state.context.contains_key(&context_id));
     assert_eq!(state.last_sequence, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn ui_state_is_durable_and_ui_events_are_core_scoped() -> airicode::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let core = CoreBuilder::new()
+        .project(project_from_path(directory.path().to_path_buf()))
+        .build()
+        .await?;
+    let group_id = SessionGroupId::new();
+    let session = core.create_session(group_id)?;
+    let ui = UIState {
+        selected_model: None,
+        selected_mode: Some("plan".into()),
+        selected_variant: Some("review".into()),
+    };
+
+    session.operations().update_ui_state(ui.clone()).await?;
+    assert_eq!(session.snapshot().ui, ui);
+
+    let mut events = core.subscribe_ui_events();
+    let session_id = session.snapshot().session_id;
+    session
+        .operations()
+        .emit_ui_event(UIEvent::OpenSession { session_id })?;
+    assert!(matches!(
+        events.recv().await.expect("UI event should be delivered"),
+        UIEvent::OpenSession { session_id: received } if received == session_id
+    ));
     Ok(())
 }
 
@@ -253,7 +283,7 @@ fn reducer_rejects_sequence_gaps() {
     let mut state = SessionState::new(SessionId::new(group_id), group_id);
     let commit = airicode::core::models::SessionCommit::new(
         2,
-        vec![SessionMutation::DurableUIStateUpdated {
+        vec![SessionMutation::UIStateUpdated {
             state: Default::default(),
         }],
     );

@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::{
@@ -32,7 +31,7 @@ struct TodoItemSchema {
     priority: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct TodoItem {
     pub content: String,
     pub status: String,
@@ -61,7 +60,7 @@ impl Tool for ToolTodo {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "todo".into(),
-            description: "Replace the durable session todo list with the complete array supplied in `todos`; send the full desired state rather than a delta. Each item needs `content` and may use `pending`, `in_progress`, `completed`, or `cancelled` status plus a priority. The updated list is stored in the todo plugin namespace and a short count is returned.".into(),
+            description: "Record the complete todo list supplied in `todos` as a session note; send the full desired state rather than a delta. Each item needs `content` and may use `pending`, `in_progress`, `completed`, or `cancelled` status plus a priority. A short count is returned.".into(),
             input: ToolInputDefinition::new(json_schema::<TodoInputSchema>()),
         }
     }
@@ -111,11 +110,6 @@ impl Tool for ToolTodo {
                 priority: priority.into(),
             });
         }
-        let value = serde_json::to_value(&normalized)?;
-        context
-            .operations
-            .update_plugin_state("todo", value)
-            .await?;
         let content = normalized
             .iter()
             .map(|todo| {

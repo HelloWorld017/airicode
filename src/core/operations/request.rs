@@ -3,7 +3,7 @@ use tokio::sync::oneshot;
 use super::{Operations, SessionRequest};
 use crate::core::error::{Error, Result};
 use crate::core::models::{
-    DurableUIState, RuntimeEvent, SessionCommit, SessionMutation, SessionState,
+    RuntimeEvent, SessionCommit, SessionMutation, SessionState, UIEvent, UIState,
 };
 
 impl Operations {
@@ -37,19 +37,13 @@ impl Operations {
             .map_err(|_| Error::Session("session actor stopped".into()))?
     }
 
-    pub async fn update_ui_state(&self, state: DurableUIState) -> Result<SessionCommit> {
-        self.commit(vec![SessionMutation::DurableUIStateUpdated { state }])
+    pub async fn update_ui_state(&self, state: UIState) -> Result<SessionCommit> {
+        self.commit(vec![SessionMutation::UIStateUpdated { state }])
             .await
     }
 
-    pub async fn update_plugin_state(
-        &self,
-        namespace: impl Into<String>,
-        value: serde_json::Value,
-    ) -> Result<SessionCommit> {
-        let mut state = self.snapshot().await?.ui.durable;
-        state.plugin_state.insert(namespace.into(), value);
-        self.update_ui_state(state).await
+    pub fn emit_ui_event(&self, event: UIEvent) -> Result<()> {
+        self.host()?.core().emit_ui_event(event)
     }
 
     pub(crate) async fn emit(&self, event: RuntimeEvent) -> Result<()> {

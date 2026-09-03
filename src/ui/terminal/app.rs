@@ -17,8 +17,8 @@ use ratatui::{
 };
 
 use crate::core::{
-    Error, Result, SessionHandle,
-    models::{ModelRef, ProviderId, RuntimeEvent},
+    Core, Error, Result, SessionHandle,
+    models::{ModelRef, ProviderId, RuntimeEvent, UIEvent, UIState},
     runtime::{TurnEngine, TurnRequest},
 };
 
@@ -38,7 +38,9 @@ pub struct TerminalApp {
     pub editor: EditorState,
     pub statusbar: StatusBarState,
     pub editbar: EditBarState,
+    core: Core,
     engine: TurnEngine,
+    default_model: ModelRef,
     provider_id: ProviderId,
     model: String,
     streaming: String,
@@ -57,29 +59,31 @@ pub struct TerminalApp {
 
 impl TerminalApp {
     pub fn new(session: SessionHandle, provider_id: ProviderId, model: impl Into<String>) -> Self {
-        let model = model.into();
+        let default_model = ModelRef {
+            provider_id,
+            model_id: model.into(),
+        };
         let engine = session.turn_engine();
-        Self {
+        let mut app = Self {
+            core: session.core(),
             session,
             editor: EditorState::default(),
             statusbar: StatusBarState {
                 title: "AiriCode".into(),
-                selected_model: Some(ModelRef {
-                    provider_id,
-                    model_id: model.clone(),
-                }),
+                selected_model: Some(default_model.clone()),
                 status: "ready".into(),
                 ..Default::default()
             },
             editbar: EditBarState {
                 mode: "build".into(),
-                model: model.clone(),
+                model: default_model.model_id.clone(),
                 variant: "default".into(),
                 input_state: "insert".into(),
             },
             engine,
-            provider_id,
-            model,
+            default_model: default_model.clone(),
+            provider_id: default_model.provider_id,
+            model: default_model.model_id.clone(),
             streaming: String::new(),
             reasoning: String::new(),
             tool_streaming: None,
@@ -92,7 +96,15 @@ impl TerminalApp {
             message_area: Rect::default(),
             transcript: Vec::new(),
             content_height: 0,
-        }
+        };
+        app.hydrate_ui_state();
+        app
+    }
+
+    pub async fn update_ui_state(&mut self, state: UIState) -> Result<()> {
+        self.session.operations().update_ui_state(state).await?;
+        self.hydrate_ui_state();
+        Ok(())
     }
 
     pub async fn run(mut self) -> Result<()> {
@@ -134,7 +146,8 @@ impl TerminalApp {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> Result<()> {
-        let mut events = self.session.subscribe();
+        let mut runtime_events = self.session.subscribe();
+        let mut ui_events = self.core.subscribe_ui_events();
         loop {
             terminal
                 .draw(|frame| self.draw(frame))
@@ -153,9 +166,16 @@ impl TerminalApp {
                 }
             }
             if let Ok(Ok(event)) =
-                tokio::time::timeout(Duration::from_millis(1), events.recv()).await
+                tokio::time::timeout(Duration::from_millis(1), runtime_events.recv()).await
             {
                 self.handle_runtime_event(event);
+            }
+            if let Ok(Ok(event)) =
+                tokio::time::timeout(Duration::from_millis(1), ui_events.recv()).await
+            {
+                if self.handle_ui_event(event).await? {
+                    runtime_events = self.session.subscribe();
+                }
             }
         }
         Ok(())
@@ -335,6 +355,54 @@ impl TerminalApp {
         self.statusbar.status = self.status.clone();
     }
 
+    async fn handle_ui_event(&mut self, event: UIEvent) -> Result<bool> {
+        match event {
+            UIEvent::OpenSession { session_id } => {
+                let session = self
+                    .core
+                    .load_session(session_id, session_id.group_id())
+                    .await?;
+                self.set_session(session);
+                Ok(true)
+            }
+        }
+    }
+
+    fn set_session(&mut self, session: SessionHandle) {
+        self.engine = session.turn_engine();
+        self.session = session;
+        self.editor = EditorState::default();
+        self.streaming.clear();
+        self.reasoning.clear();
+        self.tool_streaming = None;
+        self.status = "ready".into();
+        self.statusbar.usage = None;
+        self.statusbar.status = self.status.clone();
+        self.scroll_offset = 0;
+        self.max_scroll = 0;
+        self.expanded.clear();
+        self.hovered = None;
+        self.hit_regions.clear();
+        self.message_area = Rect::default();
+        self.transcript.clear();
+        self.content_height = 0;
+        self.editbar.input_state = "insert".into();
+        self.hydrate_ui_state();
+    }
+
+    fn hydrate_ui_state(&mut self) {
+        let ui = self.session.snapshot().ui;
+        let selected_model = ui
+            .selected_model
+            .unwrap_or_else(|| self.default_model.clone());
+        self.provider_id = selected_model.provider_id;
+        self.model = selected_model.model_id.clone();
+        self.statusbar.selected_model = Some(selected_model);
+        self.editbar.mode = ui.selected_mode.unwrap_or_else(|| "build".into());
+        self.editbar.model = self.model.clone();
+        self.editbar.variant = ui.selected_variant.unwrap_or_else(|| "default".into());
+    }
+
     fn draw(&mut self, frame: &mut ratatui::Frame) {
         let layout = Layout::default()
             .direction(Direction::Vertical)
@@ -397,5 +465,38 @@ fn margin(area: Rect, horizontal: u16) -> Rect {
         y: area.y,
         width,
         height: area.height,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{CoreBuilder, SessionGroupId, project_from_path};
+
+    #[tokio::test]
+    async fn restores_durable_ui_state_on_startup() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let core = CoreBuilder::new()
+            .project(project_from_path(directory.path().to_path_buf()))
+            .build()
+            .await?;
+        let session = core.create_session(SessionGroupId::new())?;
+        let selected_model = ModelRef {
+            provider_id: ProviderId::new(),
+            model_id: "stored-model".into(),
+        };
+        let ui = UIState {
+            selected_model: Some(selected_model.clone()),
+            selected_mode: Some("plan".into()),
+            selected_variant: Some("review".into()),
+        };
+        session.operations().update_ui_state(ui).await?;
+
+        let app = TerminalApp::new(session, ProviderId::new(), "fallback-model");
+        assert_eq!(app.statusbar.selected_model, Some(selected_model));
+        assert_eq!(app.editbar.mode, "plan");
+        assert_eq!(app.editbar.model, "stored-model");
+        assert_eq!(app.editbar.variant, "review");
+        Ok(())
     }
 }

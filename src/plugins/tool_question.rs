@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::core::{
     error::{Error, Result},
@@ -75,17 +75,6 @@ impl Tool for ToolQuestion {
             .await?;
             return Ok(output);
         }
-        context
-            .operations
-            .update_plugin_state(
-                "question",
-                json!({
-                    "question": question,
-                    "choices": choices,
-                    "turn_id": context.turn_id.to_string(),
-                }),
-            )
-            .await?;
         let choices_text = choices
             .iter()
             .filter_map(Value::as_str)

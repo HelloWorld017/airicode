@@ -1,12 +1,13 @@
 use std::{path::PathBuf, sync::Arc};
 
 use serde_json::Value;
+use tokio::sync::broadcast;
 
 use super::{
     config::{Config, aggregate},
     error::{Error, Result},
     hooks::{ConfigReadContext, OpenProjectContext},
-    models::{Plugin, Project, ProjectId, SessionGroupId, SessionId, SessionState},
+    models::{Plugin, Project, ProjectId, SessionGroupId, SessionId, SessionState, UIEvent},
     operations::SessionHandle,
     registry::Registry,
     shell::ShellActionHandler,
@@ -69,11 +70,13 @@ impl CoreBuilder {
                 .await?;
             }
         }
+        let (ui_events, _) = broadcast::channel(256);
         Ok(Core {
             inner: Arc::new(CoreInner {
                 registry,
                 config,
                 project: self.project,
+                ui_events,
             }),
         })
     }
@@ -88,6 +91,7 @@ struct CoreInner {
     registry: Registry,
     config: Config,
     project: Option<Project>,
+    ui_events: broadcast::Sender<UIEvent>,
 }
 
 impl Default for Core {
@@ -98,11 +102,13 @@ impl Default for Core {
 
 impl Core {
     pub fn new() -> Self {
+        let (ui_events, _) = broadcast::channel(256);
         Self {
             inner: Arc::new(CoreInner {
                 registry: Registry::new(),
                 config: Config::default(),
                 project: None,
+                ui_events,
             }),
         }
     }
@@ -125,6 +131,16 @@ impl Core {
     pub fn shell_action_handler(&self) -> ShellActionHandler {
         ShellActionHandler::new(self.registry())
     }
+
+    pub fn subscribe_ui_events(&self) -> broadcast::Receiver<UIEvent> {
+        self.inner.ui_events.subscribe()
+    }
+
+    pub(crate) fn emit_ui_event(&self, event: UIEvent) -> Result<()> {
+        let _ = self.inner.ui_events.send(event);
+        Ok(())
+    }
+
     pub fn create_session(&self, group_id: SessionGroupId) -> Result<SessionHandle> {
         self.open_session(SessionState::new(SessionId::new(group_id), group_id))
     }

@@ -71,6 +71,10 @@ impl SessionHandle {
         self.host.snapshot().borrow().clone()
     }
 
+    pub(crate) fn core(&self) -> super::core::Core {
+        self.host.core().clone()
+    }
+
     pub async fn shutdown(&self) -> Result<()> {
         self.host
             .sender()

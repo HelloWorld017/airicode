@@ -47,8 +47,8 @@ pub enum SessionMutation {
         content: NoteContent,
         metadata: super::message::Metadata,
     },
-    DurableUIStateUpdated {
-        state: super::ui_state::DurableUIState,
+    UIStateUpdated {
+        state: UIState,
     },
 }
 

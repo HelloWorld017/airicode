@@ -234,7 +234,7 @@ impl SessionState {
                 note.content = content.clone();
                 note.metadata = metadata.clone();
             }
-            SessionMutation::DurableUIStateUpdated { state } => self.ui.durable = state.clone(),
+            SessionMutation::UIStateUpdated { state } => self.ui = state.clone(),
         }
         Ok(())
     }
