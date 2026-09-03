@@ -115,7 +115,8 @@ impl ToolPatch {
             .and_then(Value::as_array)
             .filter(|edits| !edits.is_empty())
             .ok_or_else(|| Error::Tool("patch requires one or more edits".into()))?;
-        let bytes = context.workdir.read(Path::new(path)).await?;
+        let workdir = context.operations.workdir()?;
+        let bytes = workdir.read(Path::new(path)).await?;
         if bytes.contains(&0) {
             return Err(Error::Tool(
                 "cannot patch binary/NUL-containing input".into(),
@@ -177,10 +178,7 @@ impl ToolPatch {
         if context.cancellation.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        context
-            .workdir
-            .write(Path::new(path), patched.as_bytes())
-            .await?;
+        workdir.write(Path::new(path), patched.as_bytes()).await?;
         Ok(format!("Applied {} replacement(s) to {path}", edits.len()))
     }
 }
@@ -240,7 +238,7 @@ mod tests {
     #[test]
     fn patch_is_json_only() {
         let input = ToolPatch::new().definition().input;
-        assert!(input.freeform_parser.is_none());
+        assert!(input.freeform.is_none());
         assert_eq!(input.schema["required"], json!(["path", "edits"]));
     }
 }

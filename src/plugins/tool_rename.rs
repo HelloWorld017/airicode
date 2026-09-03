@@ -67,7 +67,12 @@ impl Tool for ToolRename {
         if context.cancellation.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        let output = match context.workdir.rename(Path::new(from), Path::new(to)).await {
+        let output = match context
+            .operations
+            .workdir()?
+            .rename(Path::new(from), Path::new(to))
+            .await
+        {
             Ok(()) => ToolOutput::Success {
                 content: format!("Renamed {from} to {to}"),
             },

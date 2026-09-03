@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use futures_util::StreamExt;
 use serde_json::Value;
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -12,19 +13,128 @@ use super::{
     },
     models::{
         ContextContributionPosition, ContextPriority, ContextSource, FinishReason, Message,
-        MessagePart, MessagePartContent, NoteContent, ProjectId, ProviderEvent, ProviderRequest,
-        Role, RuntimeEvent, SessionGroupId, SessionId, ToolCallId, ToolInput, ToolOutput, TurnId,
+        MessagePart, MessagePartContent, NoteContent, Project, ProjectId, ProviderEvent,
+        ProviderRequest, Role, RuntimeEvent, SessionGroupId, SessionId, SessionState, ToolCallId,
+        ToolInput, ToolOutput, TurnId, WorkdirLayerContext,
     },
-    operations::Operations,
+    operations::{Operations, SessionRequest, run_actor},
+    persistence::SessionStore,
     registry::Registry,
-    workdir::Workdir,
+    workdir::{NativeWorkdir, Workdir},
 };
+
+pub struct SessionRuntimeDeps {
+    pub registry: Registry,
+    pub project: Project,
+    pub store: Option<Arc<dyn SessionStore>>,
+}
+
+impl SessionRuntimeDeps {
+    pub fn new(registry: Registry, project: Project) -> Self {
+        Self {
+            registry,
+            project,
+            store: None,
+        }
+    }
+}
+
+pub struct SessionRuntime {
+    project_id: ProjectId,
+    session_id: SessionId,
+    group_id: SessionGroupId,
+    registry: Registry,
+    workdir: Arc<dyn Workdir>,
+    store: Option<Arc<dyn SessionStore>>,
+    sender: mpsc::Sender<SessionRequest>,
+    snapshot: watch::Receiver<SessionState>,
+    events: broadcast::Sender<RuntimeEvent>,
+}
+
+impl SessionRuntime {
+    pub fn spawn(state: SessionState, deps: SessionRuntimeDeps) -> Result<Arc<Self>> {
+        let base: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(&deps.project.root)?);
+        let workdir = deps.registry.layer_workdir(
+            &WorkdirLayerContext {
+                project_id: deps.project.id,
+                project_name: deps.project.name.clone(),
+                session_group_id: state.group_id,
+            },
+            base,
+        );
+        let (sender, receiver) = mpsc::channel(64);
+        let (snapshot_tx, snapshot) = watch::channel(state.clone());
+        let (events, _) = broadcast::channel(256);
+        let runtime = Arc::new(Self {
+            project_id: deps.project.id,
+            session_id: state.session_id,
+            group_id: state.group_id,
+            registry: deps.registry,
+            workdir,
+            store: deps.store,
+            sender,
+            snapshot,
+            events,
+        });
+        tokio::spawn(run_actor(
+            state,
+            receiver,
+            snapshot_tx,
+            runtime.events(),
+            runtime.store(),
+        ));
+        Ok(runtime)
+    }
+
+    pub fn operations(self: &Arc<Self>) -> Operations {
+        Operations::from_runtime(Arc::downgrade(self))
+    }
+
+    pub fn turn_engine(self: &Arc<Self>) -> TurnEngine {
+        TurnEngine {
+            runtime: self.clone(),
+        }
+    }
+
+    pub(crate) fn project_id(&self) -> ProjectId {
+        self.project_id
+    }
+
+    pub(crate) fn session_id(&self) -> SessionId {
+        self.session_id
+    }
+
+    pub(crate) fn group_id(&self) -> SessionGroupId {
+        self.group_id
+    }
+
+    pub(crate) fn registry(&self) -> &Registry {
+        &self.registry
+    }
+
+    pub(crate) fn workdir(&self) -> Arc<dyn Workdir> {
+        self.workdir.clone()
+    }
+
+    pub(crate) fn store(&self) -> Option<Arc<dyn SessionStore>> {
+        self.store.clone()
+    }
+
+    pub(crate) fn sender(&self) -> mpsc::Sender<SessionRequest> {
+        self.sender.clone()
+    }
+
+    pub(crate) fn snapshot(&self) -> &watch::Receiver<SessionState> {
+        &self.snapshot
+    }
+
+    pub(crate) fn events(&self) -> broadcast::Sender<RuntimeEvent> {
+        self.events.clone()
+    }
+}
 
 #[derive(Clone)]
 pub struct TurnRequest {
-    pub project_id: ProjectId,
-    pub session_group_id: SessionGroupId,
-    pub session_id: SessionId,
     pub provider_id: super::models::ProviderId,
     pub model: String,
     pub mode: String,
@@ -34,18 +144,12 @@ pub struct TurnRequest {
 
 impl TurnRequest {
     pub fn new(
-        project_id: ProjectId,
-        session_group_id: SessionGroupId,
-        session_id: SessionId,
         provider_id: super::models::ProviderId,
         model: impl Into<String>,
         mode: impl Into<String>,
         input: impl Into<String>,
     ) -> Self {
         Self {
-            project_id,
-            session_group_id,
-            session_id,
             provider_id,
             model: model.into(),
             mode: mode.into(),
@@ -57,18 +161,16 @@ impl TurnRequest {
 
 #[derive(Clone)]
 pub struct TurnEngine {
-    pub registry: Registry,
-    pub operations: Operations,
-    pub workdir: Arc<dyn Workdir>,
+    runtime: Arc<SessionRuntime>,
 }
 
 impl TurnEngine {
-    pub fn new(registry: Registry, operations: Operations, workdir: Arc<dyn Workdir>) -> Self {
-        Self {
-            registry,
-            operations,
-            workdir,
-        }
+    fn registry(&self) -> &Registry {
+        self.runtime.registry()
+    }
+
+    fn operations(&self) -> Operations {
+        self.runtime.operations()
     }
 
     pub async fn run(&self, request: TurnRequest) -> Result<TurnId> {
@@ -77,7 +179,7 @@ impl TurnEngine {
         if let Err(error) = &result {
             if !matches!(error, Error::Cancelled) {
                 let _ = self
-                    .operations
+                    .operations()
                     .emit(RuntimeEvent::TurnFailed {
                         turn_id,
                         error: error.to_string(),
@@ -99,35 +201,38 @@ impl TurnEngine {
         user.metadata
             .insert("mode".into(), Value::String(request.mode.clone()));
         let user_for_hook = Arc::new(user.clone());
-        for (_, hook) in self.registry.hooks().before_message.clone() {
+        for (_, hook) in self.registry().hooks().before_message.clone() {
             hook.before_message(BeforeMessageContext {
                 turn_id,
                 message: user_for_hook.clone(),
             })
             .await?;
         }
-        self.operations
+        self.operations()
             .add_conversation_message(user, ContextPriority::High)
             .await?;
-        self.operations
+        self.operations()
             .emit(RuntimeEvent::TurnStarted { turn_id })
             .await?;
 
-        let provider = self.registry.provider(request.provider_id).ok_or_else(|| {
-            Error::Provider(format!(
-                "provider {} is not registered",
-                request.provider_id
-            ))
-        })?;
+        let provider = self
+            .registry()
+            .provider(request.provider_id)
+            .ok_or_else(|| {
+                Error::Provider(format!(
+                    "provider {} is not registered",
+                    request.provider_id
+                ))
+            })?;
         let mut completed = false;
         while !completed {
             if request.cancellation.is_cancelled() {
-                self.operations
+                self.operations()
                     .emit(RuntimeEvent::TurnCancelled { turn_id })
                     .await?;
                 return Err(Error::Cancelled);
             }
-            let state = self.operations.snapshot().await?;
+            let state = self.operations().snapshot().await?;
             let mut messages = Vec::new();
             for part in state.active_context() {
                 match part.source {
@@ -145,7 +250,7 @@ impl TurnEngine {
                 }
             }
             let contributions = self
-                .registry
+                .registry()
                 .hooks()
                 .contributions(ContextContributionContext {
                     turn_id,
@@ -154,7 +259,7 @@ impl TurnEngine {
                 .await?;
             messages = materialize_context(messages, contributions, turn_id, &request.mode);
             let tools = self.tools_for_model(&request.model);
-            for (_, hook) in self.registry.hooks().before_provider_request.clone() {
+            for (_, hook) in self.registry().hooks().before_provider_request.clone() {
                 hook.before_provider_request(BeforeProviderRequestContext {
                     turn_id,
                     model: request.model.clone(),
@@ -174,14 +279,14 @@ impl TurnEngine {
             {
                 Ok(round) => round,
                 Err(Error::Cancelled) => {
-                    self.operations
+                    self.operations()
                         .emit(RuntimeEvent::TurnCancelled { turn_id })
                         .await?;
                     return Err(Error::Cancelled);
                 }
                 Err(error) => return Err(error),
             };
-            self.operations
+            self.operations()
                 .emit(RuntimeEvent::ProviderRoundFinished {
                     turn_id,
                     reason: round.reason.clone(),
@@ -199,10 +304,10 @@ impl TurnEngine {
             };
             let assistant_parts = assistant.content.clone();
             if !assistant_parts.is_empty() {
-                self.operations
+                self.operations()
                     .add_conversation_message(assistant.clone(), ContextPriority::High)
                     .await?;
-                self.operations
+                self.operations()
                     .emit(RuntimeEvent::AssistantMessageCommitted {
                         turn_id,
                         message: assistant,
@@ -224,7 +329,7 @@ impl TurnEngine {
                     .await?;
                     continue;
                 }
-                self.operations
+                self.operations()
                     .emit(RuntimeEvent::ToolExecutionStarted {
                         turn_id,
                         call_id: call.id.clone(),
@@ -234,14 +339,14 @@ impl TurnEngine {
                 let output = match self.execute_tool(&request, turn_id, call).await {
                     Ok(output) => output,
                     Err(Error::Cancelled) => {
-                        self.operations
+                        self.operations()
                             .emit(RuntimeEvent::TurnCancelled { turn_id })
                             .await?;
                         return Err(Error::Cancelled);
                     }
                     Err(error) => return Err(error),
                 };
-                self.operations
+                self.operations()
                     .emit(RuntimeEvent::ToolExecutionFinished {
                         turn_id,
                         call_id: output.0.clone(),
@@ -258,7 +363,7 @@ impl TurnEngine {
                 completed = true;
             }
         }
-        self.operations
+        self.operations()
             .emit(RuntimeEvent::TurnCompleted { turn_id })
             .await?;
         Ok(turn_id)
@@ -284,7 +389,7 @@ impl TurnEngine {
             match item? {
                 ProviderEvent::TextDelta { text: delta } => {
                     text.push_str(&delta);
-                    self.operations
+                    self.operations()
                         .emit(RuntimeEvent::ProviderStreamDelta {
                             turn_id,
                             text: delta,
@@ -294,7 +399,7 @@ impl TurnEngine {
                 }
                 ProviderEvent::ReasoningDelta { text: delta } => {
                     reasoning.push_str(&delta);
-                    self.operations
+                    self.operations()
                         .emit(RuntimeEvent::ProviderStreamDelta {
                             turn_id,
                             text: delta,
@@ -346,7 +451,7 @@ impl TurnEngine {
                     if let Some(id) = id {
                         call.id = ToolCallId::from_external(id);
                     }
-                    self.operations
+                    self.operations()
                         .emit(RuntimeEvent::ToolInputDelta {
                             turn_id,
                             name: call.name.clone(),
@@ -373,7 +478,7 @@ impl TurnEngine {
                     output_parts.insert(index, part);
                 }
                 ProviderEvent::Usage { usage } => {
-                    self.operations
+                    self.operations()
                         .emit(RuntimeEvent::ProviderUsageUpdated { turn_id, usage })
                         .await?
                 }
@@ -406,9 +511,9 @@ impl TurnEngine {
                                 .and_then(Value::as_str)
                                 == Some("custom_tool_call")
                                 || self
-                                    .registry
+                                    .registry()
                                     .tool_by_name(name)
-                                    .map(|tool| tool.definition().input.freeform_parser.is_some())
+                                    .map(|tool| tool.definition().input.freeform.is_some())
                                     .unwrap_or(false),
                             input_done: true,
                         },
@@ -430,7 +535,7 @@ impl TurnEngine {
                 let arguments = match &call.canonical_arguments {
                     Some(arguments) => arguments.clone(),
                     None if call.custom => self
-                        .registry
+                        .registry()
                         .tool_by_name(&call.name)
                         .ok_or_else(|| Error::Provider(format!("unknown tool: {}", call.name)))?
                         .definition()
@@ -465,8 +570,8 @@ impl TurnEngine {
         turn_id: TurnId,
         call: AssembledCall,
     ) -> Result<(ToolCallId, ToolOutput)> {
-        let Some(tool) = self.registry.tool_by_name(&call.name) else {
-            self.operations
+        let Some(tool) = self.registry().tool_by_name(&call.name) else {
+            self.operations()
                 .add_note(
                     NoteContent::Alert {
                         content: format!("Unknown tool: {}", call.name),
@@ -481,7 +586,7 @@ impl TurnEngine {
                 },
             ));
         };
-        for (_, hook) in self.registry.hooks().before_tool.clone() {
+        for (_, hook) in self.registry().hooks().before_tool.clone() {
             hook.before_tool_execution(BeforeToolExecutionContext {
                 turn_id,
                 call_id: call.id.clone(),
@@ -496,12 +601,8 @@ impl TurnEngine {
                 .unwrap_or(Value::String(call.arguments)),
         };
         let context = super::models::ToolContext {
-            project_id: request.project_id,
-            session_group_id: request.session_group_id,
-            session_id: request.session_id,
             turn_id,
-            operations: self.operations.clone(),
-            workdir: self.workdir.clone(),
+            operations: self.operations(),
             cancellation: request.cancellation.child_token(),
         };
         let note_operations = context.operations.clone();
@@ -521,7 +622,7 @@ impl TurnEngine {
             }
             Err(error) => return Err(error),
         };
-        for (_, hook) in self.registry.hooks().after_tool.clone() {
+        for (_, hook) in self.registry().hooks().after_tool.clone() {
             hook.after_tool_execution(super::hooks::AfterToolExecutionContext {
                 turn_id,
                 call_id: call.id.clone(),
@@ -534,7 +635,7 @@ impl TurnEngine {
     }
 
     fn tools_for_model(&self, model: &str) -> Vec<super::models::ToolDefinition> {
-        let tools = self.registry.tools();
+        let tools = self.registry().tools();
         let hashline = tools
             .iter()
             .find(|tool| tool.definition().name == "patch_hashline");
@@ -590,7 +691,7 @@ impl TurnEngine {
             created_at: super::models::TimeSeq::new(),
             metadata: BTreeMap::new(),
         };
-        self.operations
+        self.operations()
             .add_conversation_message(message, ContextPriority::High)
             .await?;
         Ok(())

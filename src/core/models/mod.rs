@@ -1,6 +1,7 @@
 pub mod command;
 pub mod context;
 pub mod events;
+pub mod file_context;
 pub mod id;
 pub mod message;
 pub mod note;
@@ -18,6 +19,7 @@ pub use crate::utils::TimeSeq;
 pub use command::*;
 pub use context::*;
 pub use events::*;
+pub use file_context::*;
 pub use id::*;
 pub use message::*;
 pub use note::*;

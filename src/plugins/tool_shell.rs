@@ -46,7 +46,11 @@ impl Tool for ToolShell {
                 "type": "object",
                 "properties": { "command": { "type": "string" } },
                 "required": ["command"]
-            })).with_freeform_parser(parse_shell_freeform),
+            }))
+            .with_freeform(
+                "Execute a shell command in the current workdir. Supply the command as raw text.",
+                parse_shell_freeform,
+            ),
         }
     }
     async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {
@@ -72,7 +76,8 @@ impl Tool for ToolShell {
             max_output_bytes: self.max_output_bytes,
         };
         let result = match context
-            .workdir
+            .operations
+            .workdir()?
             .execute(spec, context.cancellation.clone())
             .await
         {

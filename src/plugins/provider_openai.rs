@@ -210,7 +210,7 @@ fn responses_body(request: &ProviderRequest, provider_id: ProviderId, freeform: 
 }
 
 fn uses_freeform(tool: &ToolDefinition, freeform: bool) -> bool {
-    freeform && tool.input.freeform_parser.is_some()
+    freeform && tool.input.freeform.is_some()
 }
 
 fn responses_tool(tool: &ToolDefinition, freeform: bool) -> Value {
@@ -218,7 +218,7 @@ fn responses_tool(tool: &ToolDefinition, freeform: bool) -> Value {
         json!({
             "type": "custom",
             "name": tool.name,
-            "description": tool.description,
+            "description": tool.input.freeform.as_ref().expect("freeform tool").description,
         })
     } else {
         json!({
@@ -798,7 +798,7 @@ mod tests {
                 name: "shell".into(),
                 description: "run a command".into(),
                 input: ToolInputDefinition::new(serde_json::json!({ "type": "object" }))
-                    .with_freeform_parser(parse_shell_freeform),
+                    .with_freeform("run a raw command", parse_shell_freeform),
             },
             ToolDefinition {
                 name: "write".into(),
@@ -807,19 +807,19 @@ mod tests {
                     "type": "object",
                     "properties": { "path": { "type": "string" } }
                 }))
-                .with_freeform_parser(parse_write_freeform),
+                .with_freeform("write raw file contents", parse_write_freeform),
             },
             ToolDefinition {
                 name: "apply_patch".into(),
                 description: "apply a patch".into(),
                 input: ToolInputDefinition::new(serde_json::json!({ "type": "object" }))
-                    .with_freeform_parser(parse_apply_patch_freeform),
+                    .with_freeform("apply a raw patch", parse_apply_patch_freeform),
             },
             ToolDefinition {
                 name: "patch_hashline".into(),
                 description: "apply a hashline patch".into(),
                 input: ToolInputDefinition::new(serde_json::json!({ "type": "object" }))
-                    .with_freeform_parser(parse_patch_hashline_freeform),
+                    .with_freeform("apply a raw hashline patch", parse_patch_hashline_freeform),
             },
             ToolDefinition {
                 name: "patch".into(),
@@ -844,6 +844,11 @@ mod tests {
             assert_eq!(tool["type"], "custom");
             assert!(tool.get("parameters").is_none());
         }
+        assert_eq!(json_body["tools"][0]["description"], "run a command");
+        assert_eq!(
+            freeform_body["tools"][0]["description"],
+            "run a raw command"
+        );
         assert_eq!(freeform_body["tools"][4]["type"], "function");
     }
 
@@ -853,7 +858,7 @@ mod tests {
             name: "shell".into(),
             description: "run a command".into(),
             input: ToolInputDefinition::new(serde_json::json!({ "type": "object" }))
-                .with_freeform_parser(parse_shell_freeform),
+                .with_freeform("run a raw command", parse_shell_freeform),
         };
         let message = Message {
             content: vec![MessagePart::tool_call(
@@ -1024,7 +1029,7 @@ mod tests {
             name: "shell".into(),
             description: "run a command".into(),
             input: ToolInputDefinition::new(serde_json::json!({ "type": "object" }))
-                .with_freeform_parser(parse_shell_freeform),
+                .with_freeform("run a raw command", parse_shell_freeform),
         };
         let mut output_items = BTreeMap::new();
         let mut saw_tool_call = false;

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 
@@ -6,8 +6,8 @@ use super::{
     config::Config,
     error::Result,
     models::{
-        ContextContribution, ContextPriority, Message, PluginId, Project, ToolCallId, ToolOutput,
-        TurnId,
+        ContextContribution, ContextPriority, FileContext, Message, PluginId, Project, ToolCallId,
+        ToolOutput, TurnId,
     },
     registry::PluginRegistryScope,
 };
@@ -57,6 +57,12 @@ pub struct AfterToolExecutionContext {
     pub output: ToolOutput,
 }
 
+#[derive(Clone)]
+pub struct BuildFileContextHookContext {
+    pub path: PathBuf,
+    pub source: Arc<str>,
+}
+
 #[async_trait]
 pub trait ConfigReadHook: Send + Sync {
     async fn config_read(&self, context: ConfigReadContext) -> Result<()>;
@@ -95,6 +101,15 @@ pub trait AfterToolExecutionHook: Send + Sync {
     async fn after_tool_execution(&self, context: AfterToolExecutionContext) -> Result<()>;
 }
 
+#[async_trait]
+pub trait BuildFileContextHook: Send + Sync {
+    async fn augment_file_context(
+        &self,
+        context: BuildFileContextHookContext,
+        file_context: &mut FileContext,
+    ) -> Result<()>;
+}
+
 #[derive(Default)]
 pub struct HookRegistry {
     pub config_read: Vec<(PluginId, Arc<dyn ConfigReadHook>)>,
@@ -104,6 +119,7 @@ pub struct HookRegistry {
     pub before_provider_request: Vec<(PluginId, Arc<dyn BeforeProviderRequestHook>)>,
     pub before_tool: Vec<(PluginId, Arc<dyn BeforeToolExecutionHook>)>,
     pub after_tool: Vec<(PluginId, Arc<dyn AfterToolExecutionHook>)>,
+    pub build_file_context: Vec<(PluginId, Arc<dyn BuildFileContextHook>)>,
 }
 
 pub trait RegisterHook {
@@ -137,6 +153,12 @@ impl RegisterHook for Arc<dyn BeforeToolExecutionHook> {
 impl RegisterHook for Arc<dyn AfterToolExecutionHook> {
     fn register_into(self, registry: &mut HookRegistry, owner: PluginId) {
         registry.after_tool.push((owner, self));
+    }
+}
+
+impl RegisterHook for Arc<dyn BuildFileContextHook> {
+    fn register_into(self, registry: &mut HookRegistry, owner: PluginId) {
+        registry.build_file_context.push((owner, self));
     }
 }
 

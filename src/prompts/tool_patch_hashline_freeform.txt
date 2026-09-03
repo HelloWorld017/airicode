@@ -13,22 +13,6 @@ starting with `+` or `-` are preserved exactly.
 The heredoc closing tag must be the only text on its line. Use a tag that does
 not occur by itself on a content line.
 
-### ADD
-
-`ADD path <<<TAG`
-`content`
-`TAG`
-
-`ADD` creates a new file and fails if the file already exists.
-
-Example:
-
-ADD src/example.rs <<<EOF
-use std::fmt;
-
-pub fn example() {}
-EOF
-
 ### REPLACE
 
 `REPLACE path FROM start-anchor TO end-anchor <<<TAG`
@@ -67,13 +51,13 @@ EOF
 
 ### DELETE
 
-`DELETE path`
+`DELETE path FROM start-anchor TO end-anchor`
 
-`DELETE` removes the entire existing file and has no body.
+`DELETE` removes the inclusive anchored range and has no body.
 
 Example:
 
-DELETE src/obsolete.rs
+DELETE src/obsolete.rs FROM 4:241 TO 7:aC9
 
 ## Rules
 

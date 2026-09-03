@@ -1,4 +1,4 @@
-use std::{collections::HashSet, io, sync::Arc, time::Duration};
+use std::{collections::HashSet, io, time::Duration};
 
 use crossterm::{
     event::{
@@ -17,10 +17,9 @@ use ratatui::{
 };
 
 use crate::core::{
-    Error, Registry, Result, SessionHandle,
-    models::{ModelRef, ProjectId, ProviderId, RuntimeEvent, SessionGroupId},
+    Error, Result, SessionHandle,
+    models::{ModelRef, ProviderId, RuntimeEvent},
     runtime::{TurnEngine, TurnRequest},
-    workdir::Workdir,
 };
 
 use super::{
@@ -40,8 +39,6 @@ pub struct TerminalApp {
     pub statusbar: StatusBarState,
     pub editbar: EditBarState,
     engine: TurnEngine,
-    project_id: ProjectId,
-    group_id: SessionGroupId,
     provider_id: ProviderId,
     model: String,
     streaming: String,
@@ -59,17 +56,9 @@ pub struct TerminalApp {
 }
 
 impl TerminalApp {
-    pub fn new(
-        session: SessionHandle,
-        registry: Registry,
-        workdir: Arc<dyn Workdir>,
-        project_id: ProjectId,
-        group_id: SessionGroupId,
-        provider_id: ProviderId,
-        model: impl Into<String>,
-    ) -> Self {
+    pub fn new(session: SessionHandle, provider_id: ProviderId, model: impl Into<String>) -> Self {
         let model = model.into();
-        let operations = session.operations.clone();
+        let engine = session.turn_engine();
         Self {
             session,
             editor: EditorState::default(),
@@ -88,9 +77,7 @@ impl TerminalApp {
                 variant: "default".into(),
                 input_state: "insert".into(),
             },
-            engine: TurnEngine::new(registry, operations, workdir),
-            project_id,
-            group_id,
+            engine,
             provider_id,
             model,
             streaming: String::new(),
@@ -188,9 +175,6 @@ impl TerminalApp {
                 self.scroll_offset = 0;
                 self.status = "running".into();
                 let request = TurnRequest::new(
-                    self.project_id,
-                    self.group_id,
-                    self.session.operations.session_id(),
                     self.provider_id,
                     self.model.clone(),
                     self.editbar.mode.clone(),

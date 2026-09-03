@@ -1,8 +1,11 @@
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
-use serde_json::Value;
+use serde::Deserialize;
 
 use crate::{
     core::{
@@ -14,14 +17,12 @@ use crate::{
         },
         registry::PluginRegistryScope,
     },
-    utils::{
-        PathCorrectionKind, hashline, note::add_output_note, path_correction, schema::json_schema,
-    },
+    utils::{PathCorrectionKind, note::add_output_note, path_correction, schema::json_schema},
 };
 
-#[allow(dead_code)]
-#[derive(JsonSchema)]
-struct ReadInputSchema {
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ReadInput {
     path: String,
     #[schemars(range(min = 1))]
     start_line: Option<usize>,
@@ -75,23 +76,35 @@ impl Tool for ToolRead {
             } else {
                 "Read a UTF-8 text file from the current workdir and return numbered lines in the form `<line>|<content>`. `start_line` and `end_line` are optional inclusive line limits. Binary/NUL-containing files and requests beyond the configured size or line limits fail."
             }.into(),
-            input: ToolInputDefinition::new(json_schema::<ReadInputSchema>()),
+            input: ToolInputDefinition::new(json_schema::<ReadInput>()),
         }
     }
     async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {
-        let object = input
-            .as_object()
-            .ok_or_else(|| Error::Tool("read input must be an object".into()))?;
-        let path = object
-            .get("path")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::Tool("read requires path".into()))?;
-        let bytes = match context.workdir.read(Path::new(path)).await {
-            Ok(bytes) => bytes,
+        let input: ReadInput = serde_json::from_value(input)
+            .map_err(|error| Error::Tool(format!("invalid read input: {error}")))?;
+        if input.path.is_empty() {
+            return Err(Error::Tool("read requires path".into()));
+        }
+        if context.cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let file_context = match context
+            .operations
+            .build_file_context(crate::core::models::BuildFileContextRequest {
+                path: PathBuf::from(&input.path),
+                start_line: input.start_line,
+                end_line: input.end_line,
+                max_lines: Some(self.max_lines),
+                max_bytes: Some(self.max_bytes),
+            })
+            .await
+        {
+            Ok(file_context) => file_context,
             Err(Error::Workdir(message)) => {
+                let workdir = context.operations.workdir()?;
                 let content = match path_correction(
-                    Path::new(path),
-                    context.workdir.as_ref(),
+                    Path::new(&input.path),
+                    workdir.as_ref(),
                     PathCorrectionKind::File,
                 )
                 .await
@@ -105,73 +118,34 @@ impl Tool for ToolRead {
                 add_output_note(&context, "read", "Read failed", &output).await?;
                 return Ok(output);
             }
+            Err(Error::Tool(content)) => {
+                let output = ToolOutput::Failure { content };
+                add_output_note(&context, "read", "Read failed", &output).await?;
+                return Ok(output);
+            }
             Err(error) => return Err(error),
         };
-        if bytes.contains(&0) {
-            let output = ToolOutput::Failure {
-                content: "cannot read binary/NUL-containing input".into(),
-            };
-            add_output_note(&context, "read", "Read failed", &output).await?;
-            return Ok(output);
-        }
-        if bytes.len() > self.max_bytes {
-            let output = ToolOutput::Failure {
-                content: format!("file exceeds read limit of {} bytes", self.max_bytes),
-            };
-            add_output_note(&context, "read", "Read failed", &output).await?;
-            return Ok(output);
-        }
-        if context.cancellation.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
-        let text = std::str::from_utf8(&bytes)
-            .map_err(|_| Error::Tool("cannot read non-UTF-8 input".into()))?;
-        let all = hashline::render(text);
-        let start = object
-            .get("start_line")
-            .and_then(Value::as_u64)
-            .unwrap_or(1)
-            .max(1) as usize;
-        let end = object
-            .get("end_line")
-            .and_then(Value::as_u64)
-            .map(|value| value as usize)
-            .unwrap_or(all.len());
-        if end < start {
-            let output = ToolOutput::Failure {
-                content: "invalid line range".into(),
-            };
-            add_output_note(&context, "read", "Read failed", &output).await?;
-            return Ok(output);
-        }
-        if end - start + 1 > self.max_lines {
-            let output = ToolOutput::Failure {
-                content: format!("line range exceeds read limit of {} lines", self.max_lines),
-            };
-            add_output_note(&context, "read", "Read failed", &output).await?;
-            return Ok(output);
-        }
-        let selected = all
+        let selected = file_context
+            .lines
             .into_iter()
-            .filter(|line| line.line >= start && line.line <= end)
-            .map(|line| {
-                if self.enable_hashline {
-                    format!("{}:{}|{}", line.line, line.tag, line.text)
-                } else {
-                    format!("{}|{}", line.line, line.text)
-                }
-            })
+            .map(|line| format!("{}|{}", line.display_prefix, line.text))
             .collect::<Vec<_>>()
             .join("\n");
-        let range = if let Some(end) = object.get("end_line").and_then(Value::as_u64) {
-            format!(":{start}-{end}")
-        } else if start > 1 {
+        let range = if let Some(end) = input.end_line {
+            format!(":{}-{end}", input.start_line.unwrap_or(1))
+        } else if let Some(start) = input.start_line {
             format!(":{start}-")
         } else {
             String::new()
         };
         let output = ToolOutput::Success { content: selected };
-        add_output_note(&context, "read", format!("Read {path}{range}"), &output).await?;
+        add_output_note(
+            &context,
+            "read",
+            format!("Read {}{range}", input.path),
+            &output,
+        )
+        .await?;
         Ok(output)
     }
 }

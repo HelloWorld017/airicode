@@ -53,7 +53,10 @@ impl Tool for ToolPatchApplyPatch {
                 "properties": { "patch": { "type": "string" } },
                 "required": ["patch"]
             }))
-            .with_freeform_parser(parse_apply_patch_freeform),
+            .with_freeform(
+                include_str!("../prompts/tool_patch_apply_patch.txt"),
+                parse_apply_patch_freeform,
+            ),
         }
     }
 
@@ -181,7 +184,8 @@ impl ToolPatchApplyPatch {
             }
             if let Some(content) = &state.content {
                 context
-                    .workdir
+                    .operations
+                    .workdir()?
                     .write(Path::new(path), content.as_bytes())
                     .await?;
             }
@@ -191,7 +195,11 @@ impl ToolPatchApplyPatch {
                 return Err(Error::Cancelled);
             }
             if state.original != state.content && state.content.is_none() {
-                context.workdir.remove(Path::new(path)).await?;
+                context
+                    .operations
+                    .workdir()?
+                    .remove(Path::new(path))
+                    .await?;
             }
         }
         Ok(format!(
@@ -242,8 +250,9 @@ async fn load_file(
     if context.cancellation.is_cancelled() {
         return Err(Error::Cancelled);
     }
-    let content = if context.workdir.exists(Path::new(path)).await? {
-        let bytes = context.workdir.read(Path::new(path)).await?;
+    let workdir = context.operations.workdir()?;
+    let content = if workdir.exists(Path::new(path)).await? {
+        let bytes = workdir.read(Path::new(path)).await?;
         if bytes.contains(&0) {
             return Err(Error::Tool(format!(
                 "cannot patch binary/NUL-containing input: {path}"

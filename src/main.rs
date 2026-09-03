@@ -20,7 +20,6 @@ async fn main() -> airicode::Result<()> {
     let root = std::fs::canonicalize(root)?;
 
     let project = project_from_path(root.clone());
-    let workdir = Arc::new(airicode::core::workdir::NativeWorkdir::new(root.clone())?);
     let persistence = Arc::new(PersistencePlugin::new());
     let builder = CoreBuilder::new()
         .project(project.clone())
@@ -51,22 +50,18 @@ async fn main() -> airicode::Result<()> {
         }
     };
 
-    let (session, group_id) = match persistence.discover().await?.into_iter().next() {
+    let session = match persistence.discover().await?.into_iter().next() {
         Some(session_id) => {
             let group_id = session_id.group_id();
-            (core.load_session(session_id, group_id).await?, group_id)
+            core.load_session(session_id, group_id).await?
         }
         None => {
             let group_id = SessionGroupId::new();
-            (core.create_session(group_id), group_id)
+            core.create_session(group_id)?
         }
     };
     TerminalApp::new(
         session,
-        core.registry(),
-        workdir,
-        project.id,
-        group_id,
         provider_id,
         std::env::var("AIRICODE_MODEL").unwrap_or_else(|_| "minimax-m3".into()),
     )

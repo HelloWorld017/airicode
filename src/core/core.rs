@@ -4,11 +4,12 @@ use serde_json::Value;
 
 use super::{
     config::{Config, aggregate},
-    error::Result,
+    error::{Error, Result},
     hooks::{ConfigReadContext, OpenProjectContext},
     models::{Plugin, Project, ProjectId, SessionGroupId, SessionId, SessionState},
-    operations::{SessionHandle, new_session, new_session_with_store},
+    operations::SessionHandle,
     registry::Registry,
+    runtime::SessionRuntimeDeps,
     shell::ShellActionHandler,
 };
 
@@ -104,14 +105,23 @@ impl Core {
     pub fn shell_action_handler(&self) -> ShellActionHandler {
         ShellActionHandler::new(self.registry())
     }
-    pub fn create_session(&self, group_id: SessionGroupId) -> SessionHandle {
-        match self.registry.session_store() {
-            Some(store) => new_session_with_store(SessionId::new(group_id), group_id, store),
-            None => new_session(SessionId::new(group_id), group_id),
-        }
+    pub fn create_session(&self, group_id: SessionGroupId) -> Result<SessionHandle> {
+        self.open_session(SessionState::new(SessionId::new(group_id), group_id))
     }
-    pub fn open_session(&self, state: SessionState) -> SessionHandle {
-        SessionHandle::spawn_with_store(state, self.registry.session_store())
+
+    pub fn open_session(&self, state: SessionState) -> Result<SessionHandle> {
+        let project = self
+            .project
+            .clone()
+            .ok_or_else(|| Error::Session("sessions require a project".into()))?;
+        SessionHandle::spawn(
+            state,
+            SessionRuntimeDeps {
+                registry: self.registry.clone(),
+                project,
+                store: self.registry.session_store(),
+            },
+        )
     }
 
     pub async fn load_session(
@@ -127,7 +137,7 @@ impl Core {
                 None => Vec::new(),
             },
         )?;
-        Ok(self.open_session(state))
+        self.open_session(state)
     }
 
     pub async fn open_or_create_session(

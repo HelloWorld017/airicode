@@ -2,6 +2,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::core::{
@@ -13,11 +14,11 @@ use crate::core::{
     },
     registry::PluginRegistryScope,
 };
-use crate::utils::{hashline, note::add_output_note, schema::json_schema};
+use crate::utils::{note::add_output_note, schema::json_schema};
 
-#[allow(dead_code)]
-#[derive(JsonSchema)]
-struct GrepInputSchema {
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GrepInput {
     pattern: String,
     path: Option<String>,
     glob: Option<String>,
@@ -27,7 +28,6 @@ struct GrepInputSchema {
 struct GrepMatch {
     path: PathBuf,
     line: usize,
-    text: String,
 }
 
 pub struct ToolGrep {
@@ -78,34 +78,27 @@ impl Tool for ToolGrep {
                 "Search files visible through the current workdir using a regular-expression pattern. `path` optionally limits the search scope and `glob` optionally filters filenames. Results use `path:line|content` and are size-limited."
             }
             .into(),
-            input: ToolInputDefinition::new(json_schema::<GrepInputSchema>()),
+            input: ToolInputDefinition::new(json_schema::<GrepInput>()),
         }
     }
 
     async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {
-        let object = input
-            .as_object()
-            .ok_or_else(|| Error::Tool("grep input must be an object".into()))?;
-        let pattern = object
-            .get("pattern")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::Tool("grep requires pattern".into()))?;
-        if pattern.is_empty() {
+        let input: GrepInput = serde_json::from_value(input)
+            .map_err(|error| Error::Tool(format!("invalid grep input: {error}")))?;
+        if input.pattern.is_empty() {
             let output = ToolOutput::Failure {
                 content: "grep pattern cannot be empty".into(),
             };
             add_output_note(&context, "grep", "Search failed", &output).await?;
             return Ok(output);
         }
-        let path = object
-            .get("path")
-            .and_then(Value::as_str)
+        let pattern = input.pattern;
+        let path = input
+            .path
             .filter(|path| !path.is_empty())
-            .unwrap_or(".");
-        let max_results = object
-            .get("max_results")
-            .and_then(Value::as_u64)
-            .map(|value| value as usize)
+            .unwrap_or_else(|| ".".into());
+        let max_results = input
+            .max_results
             .unwrap_or(self.max_results)
             .min(self.max_results);
         let mut args = vec![
@@ -115,12 +108,12 @@ impl Tool for ToolGrep {
             "--glob".into(),
             "!.git".into(),
         ];
-        if let Some(glob) = object.get("glob").and_then(Value::as_str) {
-            args.extend(["--glob".into(), glob.into()]);
+        if let Some(glob) = input.glob {
+            args.extend(["--glob".into(), glob]);
         }
-        args.extend(["--".into(), pattern.into(), path.into()]);
-        let result = context
-            .workdir
+        args.extend(["--".into(), pattern.clone(), path.clone()]);
+        let workdir = context.operations.workdir()?;
+        let result = workdir
             .execute(
                 CommandSpec {
                     program: "rg".into(),
@@ -174,56 +167,67 @@ impl Tool for ToolGrep {
             return Ok(output);
         }
 
+        let selected = matches.iter().take(max_results).collect::<Vec<_>>();
+        let mut paths = Vec::new();
+        let mut ranges = HashMap::new();
+        for grep_match in &selected {
+            let range = ranges
+                .entry(grep_match.path.clone())
+                .or_insert_with(|| (grep_match.line, grep_match.line));
+            range.0 = range.0.min(grep_match.line);
+            range.1 = range.1.max(grep_match.line);
+            if !paths.contains(&grep_match.path) {
+                paths.push(grep_match.path.clone());
+            }
+        }
         let mut rendered_files = HashMap::new();
-        let mut lines = Vec::new();
-        for grep_match in matches.iter().take(max_results) {
+        for path in paths {
             if context.cancellation.is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            if !self.enable_hashline {
-                lines.push(format!(
-                    "{}:{}|{}",
-                    grep_match.path.display(),
-                    grep_match.line,
-                    grep_match.text.trim_end_matches(['\r', '\n'])
-                ));
-                continue;
-            }
-            if !rendered_files.contains_key(&grep_match.path) {
-                let bytes = match context.workdir.read(&grep_match.path).await {
-                    Ok(bytes) => bytes,
-                    Err(Error::Workdir(message)) => {
-                        let output = ToolOutput::Failure { content: message };
-                        add_output_note(&context, "grep", "Search failed", &output).await?;
-                        return Ok(output);
-                    }
-                    Err(error) => return Err(error),
-                };
-                if bytes.contains(&0) {
+            let (start_line, end_line) = ranges[&path];
+            let file_context = match context
+                .operations
+                .build_file_context(crate::core::models::BuildFileContextRequest {
+                    path: path.clone(),
+                    start_line: Some(start_line),
+                    end_line: Some(end_line),
+                    max_lines: None,
+                    max_bytes: None,
+                })
+                .await
+            {
+                Ok(file_context) => file_context,
+                Err(Error::Cancelled) => return Err(Error::Cancelled),
+                Err(error) => {
                     let output = ToolOutput::Failure {
-                        content: format!(
-                            "cannot create hashline for binary/NUL-containing input: {}",
-                            grep_match.path.display()
-                        ),
+                        content: error.to_string(),
                     };
                     add_output_note(&context, "grep", "Search failed", &output).await?;
                     return Ok(output);
                 }
-                let text = std::str::from_utf8(&bytes).map_err(|_| {
-                    Error::Tool(format!(
-                        "cannot create hashline for non-UTF-8 input: {}",
-                        grep_match.path.display()
-                    ))
-                })?;
-                rendered_files.insert(grep_match.path.clone(), hashline::render(text));
+            };
+            rendered_files.insert(
+                path,
+                file_context
+                    .lines
+                    .into_iter()
+                    .map(|line| (line.line_number, line))
+                    .collect::<HashMap<_, _>>(),
+            );
+        }
+        let mut lines = Vec::new();
+        for grep_match in selected {
+            if context.cancellation.is_cancelled() {
+                return Err(Error::Cancelled);
             }
             let file_lines = rendered_files
                 .get(&grep_match.path)
                 .expect("rendered grep file should be cached");
-            let Some(line) = file_lines.iter().find(|line| line.line == grep_match.line) else {
+            let Some(line) = file_lines.get(&grep_match.line) else {
                 let output = ToolOutput::Failure {
                     content: format!(
-                        "grep result became stale while creating hashline: {}:{}",
+                        "grep result became stale while reading file context: {}:{}",
                         grep_match.path.display(),
                         grep_match.line
                     ),
@@ -232,10 +236,9 @@ impl Tool for ToolGrep {
                 return Ok(output);
             };
             lines.push(format!(
-                "{}:{}:{}|{}",
+                "{}:{}|{}",
                 grep_match.path.display(),
-                line.line,
-                line.tag,
+                line.display_prefix,
                 line.text
             ));
         }
@@ -276,15 +279,9 @@ fn parse_matches(stdout: &str) -> Vec<GrepMatch> {
                 .get("line_number")
                 .and_then(Value::as_u64)
                 .and_then(|line| usize::try_from(line).ok())?;
-            let text = data
-                .get("lines")
-                .and_then(|lines| lines.get("text"))
-                .and_then(Value::as_str)?
-                .to_string();
             Some(GrepMatch {
                 path: PathBuf::from(path),
                 line,
-                text,
             })
         })
         .collect()

@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
 use airicode::core::{
-    Tool,
+    SessionHandle, SessionRuntimeDeps, Tool,
     models::{
         ContextPriority, ContextSource, Message, MessagePart, Role, SessionGroupId, SessionId,
         SessionMutation, SessionState, ShellAction, ShellActionContext, ShellActionDefinition,
         ShellActionId, ShellActionInput, ToolDefinition, ToolId, ToolInput, ToolInputDefinition,
         ToolOutput,
     },
-    operations::new_session,
+    project_from_path,
     registry::Registry,
 };
 use async_trait::async_trait;
@@ -106,13 +106,20 @@ fn context_is_sorted_by_time_sequence_not_priority() -> airicode::Result<()> {
 #[tokio::test]
 async fn actor_commits_message_and_context_as_one_operation() -> airicode::Result<()> {
     let group_id = SessionGroupId::new();
-    let session = new_session(SessionId::new(group_id), group_id);
+    let directory = tempfile::tempdir()?;
+    let session = SessionHandle::spawn(
+        SessionState::new(SessionId::new(group_id), group_id),
+        SessionRuntimeDeps::new(
+            Registry::new(),
+            project_from_path(directory.path().to_path_buf()),
+        ),
+    )?;
     let message = Message::text(Role::User, "atomic", "build", None);
     let (message_id, context_id) = session
-        .operations
+        .operations()
         .add_conversation_message(message, ContextPriority::High)
         .await?;
-    let state = session.operations.snapshot().await?;
+    let state = session.operations().snapshot().await?;
     assert!(state.messages.contains_key(&message_id));
     assert!(state.context.contains_key(&context_id));
     assert_eq!(state.last_sequence, 1);

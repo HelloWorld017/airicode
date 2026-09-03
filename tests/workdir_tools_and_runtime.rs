@@ -3,16 +3,21 @@ use std::{path::Path, sync::Arc, time::Duration};
 use airicode::{
     Result,
     core::{
-        Tool,
+        SessionHandle, SessionRuntimeDeps, Tool,
         models::{
-            MessagePart, ProjectId, ProviderEvent, ProviderId, Role, RuntimeEvent, SessionGroupId,
-            ToolContext, ToolOutput, TurnId,
+            MessagePart, ProviderEvent, ProviderId, Role, RuntimeEvent, SessionGroupId, SessionId,
+            SessionState, ToolContext, ToolOutput, TurnId,
         },
-        operations::new_session,
-        runtime::{TurnEngine, TurnRequest},
+        project_from_path,
+        registry::Registry,
+        runtime::TurnRequest,
         workdir::{NativeWorkdir, Workdir},
     },
-    plugins::{ToolFindFile, ToolGrep, ToolRead, ToolReadPlugin, ToolShell, ToolShellPlugin},
+    plugins::{
+        ToolFindFile, ToolGrep, ToolGrepPlugin, ToolPatchHashlinePlugin, ToolRead, ToolReadPlugin,
+        ToolShell, ToolShellPlugin,
+    },
+    utils::hashline,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -21,6 +26,23 @@ use tokio_util::sync::CancellationToken;
 mod utils;
 
 use utils::{FakeProvider, FakeProviderPlugin};
+
+fn tool_context(directory: &tempfile::TempDir) -> Result<(SessionHandle, ToolContext)> {
+    let group_id = SessionGroupId::new();
+    let session = SessionHandle::spawn(
+        SessionState::new(SessionId::new(group_id), group_id),
+        SessionRuntimeDeps::new(
+            Registry::new(),
+            project_from_path(directory.path().to_path_buf()),
+        ),
+    )?;
+    let context = ToolContext {
+        turn_id: TurnId::new(),
+        operations: session.operations(),
+        cancellation: CancellationToken::new(),
+    };
+    Ok((session, context))
+}
 
 #[tokio::test]
 async fn native_workdir_reads_writes_and_executes_commands() -> Result<()> {
@@ -48,17 +70,7 @@ async fn read_and_shell_tools_use_the_shared_workdir_contract() -> Result<()> {
     workdir
         .write(Path::new("main.rs"), b"fn main() {}\n")
         .await?;
-    let group_id = SessionGroupId::new();
-    let session = new_session(airicode::core::models::SessionId::new(group_id), group_id);
-    let context = ToolContext {
-        project_id: ProjectId::from_workdir(directory.path()),
-        session_group_id: group_id,
-        session_id: session.operations.session_id(),
-        turn_id: TurnId::new(),
-        operations: session.operations.clone(),
-        workdir: workdir.clone(),
-        cancellation: CancellationToken::new(),
-    };
+    let (_session, context) = tool_context(&directory)?;
 
     let read = ToolRead::new();
     let output = read
@@ -71,7 +83,7 @@ async fn read_and_shell_tools_use_the_shared_workdir_contract() -> Result<()> {
     assert!(content.contains("|fn main() {}"));
 
     let shell = ToolShell::new();
-    assert!(shell.definition().input.freeform_parser.is_some());
+    assert!(shell.definition().input.freeform.is_some());
     let output = shell
         .execute(json!({ "command": "printf shell-output" }), context)
         .await?;
@@ -90,17 +102,7 @@ async fn read_suggests_a_corrected_path_and_grep_accepts_an_empty_path() -> Resu
     workdir
         .write(Path::new("src/main.rs"), b"before\nneedle\nafter\n")
         .await?;
-    let group_id = SessionGroupId::new();
-    let session = new_session(airicode::core::models::SessionId::new(group_id), group_id);
-    let context = ToolContext {
-        project_id: ProjectId::from_workdir(directory.path()),
-        session_group_id: group_id,
-        session_id: session.operations.session_id(),
-        turn_id: TurnId::new(),
-        operations: session.operations.clone(),
-        workdir,
-        cancellation: CancellationToken::new(),
-    };
+    let (_session, context) = tool_context(&directory)?;
 
     let read = ToolRead::new();
     let output = read
@@ -123,24 +125,76 @@ async fn read_suggests_a_corrected_path_and_grep_accepts_an_empty_path() -> Resu
 }
 
 #[tokio::test]
+async fn file_context_hook_uses_full_source_for_read_and_grep() -> Result<()> {
+    let directory = tempdir()?;
+    std::fs::write(directory.path().join("main.txt"), "before\nneedle\nafter\n")?;
+    let project = project_from_path(directory.path().to_path_buf());
+    let core = airicode::core::CoreBuilder::new()
+        .project(project)
+        .config(json!({ "tool": { "enable_hashline": true } }))
+        .plugin(Arc::new(ToolReadPlugin::new()))
+        .plugin(Arc::new(ToolGrepPlugin::new()))
+        .plugin(Arc::new(ToolPatchHashlinePlugin::new()))
+        .build()
+        .await?;
+    let session = core.create_session(SessionGroupId::new())?;
+    let context = ToolContext {
+        turn_id: TurnId::new(),
+        operations: session.operations(),
+        cancellation: CancellationToken::new(),
+    };
+    let expected = hashline::render("before\nneedle\nafter\n")[1].tag.clone();
+    let read = core.registry().tool_by_name("read").expect("read tool");
+    let output = read
+        .execute(
+            json!({ "path": "main.txt", "start_line": 2, "end_line": 2 }),
+            context.clone(),
+        )
+        .await?;
+    assert!(
+        matches!(output, ToolOutput::Success { content } if content == format!("2:{expected}|needle"))
+    );
+
+    let grep = core.registry().tool_by_name("grep").expect("grep tool");
+    let output = grep
+        .execute(json!({ "pattern": "needle" }), context)
+        .await?;
+    assert!(
+        matches!(output, ToolOutput::Success { content } if content == format!("./main.txt:2:{expected}|needle"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn operations_handle_does_not_keep_runtime_alive() -> Result<()> {
+    let directory = tempdir()?;
+    let group_id = SessionGroupId::new();
+    let operations = {
+        let session = SessionHandle::spawn(
+            SessionState::new(SessionId::new(group_id), group_id),
+            SessionRuntimeDeps::new(
+                Registry::new(),
+                project_from_path(directory.path().to_path_buf()),
+            ),
+        )?;
+        session.operations()
+    };
+
+    assert!(matches!(
+        operations.snapshot().await,
+        Err(airicode::Error::Session(message)) if message == "session runtime is no longer available"
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn find_file_supports_exact_keyword_and_glob_queries() -> Result<()> {
     let directory = tempdir()?;
     std::fs::create_dir_all(directory.path().join("src/models"))?;
     std::fs::write(directory.path().join("src/main.rs"), "fn main() {}")?;
     std::fs::write(directory.path().join("src/models/Message.rs"), "model")?;
     std::fs::write(directory.path().join("README.md"), "readme")?;
-    let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
-    let group_id = SessionGroupId::new();
-    let session = new_session(airicode::core::models::SessionId::new(group_id), group_id);
-    let context = ToolContext {
-        project_id: ProjectId::from_workdir(directory.path()),
-        session_group_id: group_id,
-        session_id: session.operations.session_id(),
-        turn_id: TurnId::new(),
-        operations: session.operations,
-        workdir,
-        cancellation: CancellationToken::new(),
-    };
+    let (_session, context) = tool_context(&directory)?;
 
     let find = ToolFindFile::new();
     let output = find
@@ -210,8 +264,6 @@ async fn find_file_supports_exact_keyword_and_glob_queries() -> Result<()> {
 async fn fake_provider_completes_a_read_tool_turn_on_a_real_project() -> Result<()> {
     let directory = tempdir()?;
     std::fs::write(directory.path().join("hello.txt"), "hello from project\n")?;
-    let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
-
     let provider_id = ProviderId::new();
     let provider = Arc::new(FakeProvider::new(
         provider_id,
@@ -271,26 +323,19 @@ async fn fake_provider_completes_a_read_tool_turn_on_a_real_project() -> Result<
     ));
     let fake_plugin = Arc::new(FakeProviderPlugin::new(provider));
     let core = airicode::core::CoreBuilder::new()
+        .project(project_from_path(directory.path().to_path_buf()))
         .plugin(fake_plugin)
         .plugin(Arc::new(ToolReadPlugin::new()))
         .plugin(Arc::new(ToolShellPlugin::new()))
         .build()
         .await?;
     let group_id = SessionGroupId::new();
-    let session = core.create_session(group_id);
-    let engine = TurnEngine::new(core.registry(), session.operations.clone(), workdir);
-    let request = TurnRequest::new(
-        ProjectId::from_workdir(directory.path()),
-        group_id,
-        session.operations.session_id(),
-        provider_id,
-        "fake-model",
-        "build",
-        "Read hello.txt",
-    );
+    let session = core.create_session(group_id)?;
+    let engine = session.turn_engine();
+    let request = TurnRequest::new(provider_id, "fake-model", "build", "Read hello.txt");
     engine.run(request).await?;
 
-    let state = session.operations.snapshot().await?;
+    let state = session.operations().snapshot().await?;
     assert_eq!(
         state
             .visible_messages()
@@ -319,7 +364,6 @@ async fn fake_provider_completes_a_read_tool_turn_on_a_real_project() -> Result<
 #[tokio::test]
 async fn fake_provider_executes_custom_shell_input_after_streaming_done() -> Result<()> {
     let directory = tempdir()?;
-    let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
     let provider_id = ProviderId::new();
     let provider = Arc::new(FakeProvider::new(
         provider_id,
@@ -358,26 +402,19 @@ async fn fake_provider_executes_custom_shell_input_after_streaming_done() -> Res
     ));
     let fake_plugin = Arc::new(FakeProviderPlugin::new(provider));
     let core = airicode::core::CoreBuilder::new()
+        .project(project_from_path(directory.path().to_path_buf()))
         .plugin(fake_plugin)
         .plugin(Arc::new(ToolShellPlugin::new()))
         .build()
         .await?;
     let group_id = SessionGroupId::new();
-    let session = core.create_session(group_id);
+    let session = core.create_session(group_id)?;
     let mut events = session.subscribe();
-    let engine = TurnEngine::new(core.registry(), session.operations.clone(), workdir);
-    let request = TurnRequest::new(
-        ProjectId::from_workdir(directory.path()),
-        group_id,
-        session.operations.session_id(),
-        provider_id,
-        "fake-model",
-        "build",
-        "run the command",
-    );
+    let engine = session.turn_engine();
+    let request = TurnRequest::new(provider_id, "fake-model", "build", "run the command");
     engine.run(request).await?;
 
-    let state = session.operations.snapshot().await?;
+    let state = session.operations().snapshot().await?;
     assert!(state.visible_messages().iter().any(|message| {
         message.content.iter().any(|part| {
             matches!(
@@ -401,27 +438,19 @@ async fn fake_provider_executes_custom_shell_input_after_streaming_done() -> Res
 #[tokio::test]
 async fn failed_turn_emits_error_after_persisting_user_message() -> Result<()> {
     let directory = tempdir()?;
-    let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
     let provider_id = ProviderId::new();
     let provider = Arc::new(FakeProvider::new(provider_id, std::iter::empty()));
     let fake_plugin = Arc::new(FakeProviderPlugin::new(provider));
     let core = airicode::core::CoreBuilder::new()
+        .project(project_from_path(directory.path().to_path_buf()))
         .plugin(fake_plugin)
         .build()
         .await?;
     let group_id = SessionGroupId::new();
-    let session = core.create_session(group_id);
+    let session = core.create_session(group_id)?;
     let mut events = session.subscribe();
-    let engine = TurnEngine::new(core.registry(), session.operations.clone(), workdir);
-    let request = TurnRequest::new(
-        ProjectId::from_workdir(directory.path()),
-        group_id,
-        session.operations.session_id(),
-        provider_id,
-        "fake-model",
-        "build",
-        "hello",
-    );
+    let engine = session.turn_engine();
+    let request = TurnRequest::new(provider_id, "fake-model", "build", "hello");
 
     let error = engine.run(request).await.expect_err("turn should fail");
     assert!(error.to_string().contains("no scripted response"));
@@ -437,7 +466,7 @@ async fn failed_turn_emits_error_after_persisting_user_message() -> Result<()> {
         Some("provider error: fake provider has no scripted response")
     );
 
-    let state = session.operations.snapshot().await?;
+    let state = session.operations().snapshot().await?;
     assert!(
         state
             .visible_messages()

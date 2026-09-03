@@ -311,6 +311,7 @@ impl Registry {
             before_provider_request: hooks.before_provider_request.clone(),
             before_tool: hooks.before_tool.clone(),
             after_tool: hooks.after_tool.clone(),
+            build_file_context: hooks.build_file_context.clone(),
         })
     }
 

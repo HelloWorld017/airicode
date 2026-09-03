@@ -1,6 +1,7 @@
 mod add_context_part;
 mod add_message;
 mod add_note;
+mod build_file_context;
 mod create_session;
 mod get_context;
 mod get_messages;
@@ -9,19 +10,19 @@ mod invalidate_message;
 mod request;
 mod update_note;
 
-pub use create_session::{create_session, new_session, new_session_with_store};
-
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
-use super::error::{Error, Result};
-use super::models::{
-    RuntimeEvent, SessionCommit, SessionGroupId, SessionId, SessionMutation, SessionState,
-};
+use super::models::{RuntimeEvent, SessionCommit, SessionMutation, SessionState};
 use super::persistence::SessionStore;
+use super::{
+    error::{Error, Result},
+    runtime::{SessionRuntime, SessionRuntimeDeps, TurnEngine},
+    workdir::Workdir,
+};
 
-enum SessionRequest {
+pub(crate) enum SessionRequest {
     Commit {
         mutations: Vec<SessionMutation>,
         response: oneshot::Sender<Result<SessionCommit>>,
@@ -34,66 +35,40 @@ enum SessionRequest {
 
 #[derive(Clone)]
 pub struct Operations {
-    sender: mpsc::Sender<SessionRequest>,
-    session_id: SessionId,
-    group_id: SessionGroupId,
-    events: broadcast::Sender<RuntimeEvent>,
+    runtime: Weak<SessionRuntime>,
 }
 
+#[derive(Clone)]
 pub struct SessionHandle {
-    pub operations: Operations,
-    snapshot: watch::Receiver<SessionState>,
-    events: broadcast::Sender<RuntimeEvent>,
+    runtime: Arc<SessionRuntime>,
 }
 
 impl SessionHandle {
-    pub fn spawn(state: SessionState) -> Self {
-        Self::spawn_with_store(state, None)
+    pub fn spawn(state: SessionState, deps: SessionRuntimeDeps) -> Result<Self> {
+        Ok(Self {
+            runtime: SessionRuntime::spawn(state, deps)?,
+        })
     }
 
-    pub fn spawn_with_store(state: SessionState, store: Option<Arc<dyn SessionStore>>) -> Self {
-        let (sender, receiver) = mpsc::channel(64);
-        let (snapshot_tx, snapshot) = watch::channel(state.clone());
-        let (events, _) = broadcast::channel(256);
-        let operations = Operations {
-            sender,
-            session_id: state.session_id,
-            group_id: state.group_id,
-            events: events.clone(),
-        };
-        tokio::spawn(run_actor(
-            state,
-            receiver,
-            snapshot_tx,
-            events.clone(),
-            store,
-        ));
-        Self {
-            operations,
-            snapshot,
-            events,
-        }
+    pub fn operations(&self) -> Operations {
+        self.runtime.operations()
+    }
+
+    pub fn turn_engine(&self) -> TurnEngine {
+        self.runtime.turn_engine()
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> {
-        self.events.subscribe()
+        self.runtime.events().subscribe()
     }
 
     pub fn snapshot(&self) -> SessionState {
-        self.snapshot.borrow().clone()
-    }
-
-    pub async fn wait_snapshot(&mut self) -> Result<SessionState> {
-        self.snapshot
-            .changed()
-            .await
-            .map_err(|_| Error::Session("session actor stopped".into()))?;
-        Ok(self.snapshot())
+        self.runtime.snapshot().borrow().clone()
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        self.operations
-            .sender
+        self.runtime
+            .sender()
             .send(SessionRequest::Shutdown)
             .await
             .map_err(|_| Error::Session("session actor stopped".into()))?;
@@ -101,7 +76,23 @@ impl SessionHandle {
     }
 }
 
-async fn run_actor(
+impl Operations {
+    pub(crate) fn from_runtime(runtime: Weak<SessionRuntime>) -> Self {
+        Self { runtime }
+    }
+
+    pub(crate) fn runtime(&self) -> Result<Arc<SessionRuntime>> {
+        self.runtime
+            .upgrade()
+            .ok_or_else(|| Error::Session("session runtime is no longer available".into()))
+    }
+
+    pub(crate) fn workdir(&self) -> Result<Arc<dyn Workdir>> {
+        Ok(self.runtime()?.workdir())
+    }
+}
+
+pub(crate) async fn run_actor(
     mut state: SessionState,
     mut receiver: mpsc::Receiver<SessionRequest>,
     snapshot: watch::Sender<SessionState>,

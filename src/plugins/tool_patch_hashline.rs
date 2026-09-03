@@ -5,19 +5,23 @@ use std::{
 };
 
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{
     core::{
         error::{Error, Result},
-        hooks::{ConfigReadContext, ConfigReadHook},
+        hooks::{
+            BuildFileContextHook, BuildFileContextHookContext, ConfigReadContext, ConfigReadHook,
+        },
         models::{
-            NoteContent, Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId, ToolInput,
-            ToolInputDefinition, ToolOutput,
+            FileContext, NoteContent, Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId,
+            ToolInput, ToolInputDefinition, ToolOutput,
         },
         registry::PluginRegistryScope,
     },
-    utils::{hashline, note::add_tool_note},
+    utils::{hashline, note::add_tool_note, schema::json_schema},
 };
 
 const PATCH_FORMAT: &str = r#"Expected format:
@@ -31,6 +35,59 @@ INSERT path AFTER line:hash <<<TAG
 content
 TAG
 DELETE path FROM line:hash TO line:hash"#;
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PatchHashlineInput {
+    #[schemars(length(min = 1))]
+    operations: Vec<PatchHashlineOperation>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum PatchHashlineOperation {
+    InsertBefore {
+        path: String,
+        anchor: String,
+        lines: Vec<String>,
+    },
+    InsertAfter {
+        path: String,
+        anchor: String,
+        lines: Vec<String>,
+    },
+    Replace {
+        path: String,
+        anchor_start: String,
+        anchor_end: String,
+        lines: Vec<String>,
+    },
+    Delete {
+        path: String,
+        anchor_start: String,
+        anchor_end: String,
+    },
+}
+
+struct HashlineFileContextHook;
+
+#[async_trait]
+impl BuildFileContextHook for HashlineFileContextHook {
+    async fn augment_file_context(
+        &self,
+        context: BuildFileContextHookContext,
+        file_context: &mut FileContext,
+    ) -> Result<()> {
+        for (line, rendered) in file_context
+            .lines
+            .iter_mut()
+            .zip(hashline::render(&context.source))
+        {
+            line.display_prefix = format!("{}:{}", rendered.line, rendered.tag);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OperationKind {
@@ -111,34 +168,34 @@ impl Tool for ToolPatchHashline {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "patch_hashline".into(),
-            description: include_str!("../prompts/tool_patch_hashline_freeform.txt").into(),
-            input: ToolInputDefinition::new(json!({
-                "type": "object",
-                "properties": {
-                    "operations": {
-                        "type": "array",
-                        "minItems": 1,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "kind": { "type": "string", "enum": ["insert_before", "insert_after", "replace", "delete"] },
-                                "path": { "type": "string" },
-                                "anchor": { "type": "string" },
-                                "anchor_start": { "type": "string" },
-                                "anchor_end": { "type": "string" },
-                                "lines": { "type": "array", "items": { "type": "string" } }
-                            },
-                            "required": ["kind", "path"]
-                        }
-                    }
-                },
-                "required": ["operations"]
-            })).with_freeform_parser(parse_patch_hashline_freeform),
+            description: include_str!("../prompts/tool_patch_hashline.txt").into(),
+            input: ToolInputDefinition::new(json_schema::<PatchHashlineInput>()).with_freeform(
+                include_str!("../prompts/tool_patch_hashline_freeform.txt"),
+                parse_patch_hashline_freeform,
+            ),
         }
     }
 
     async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {
-        let operations = match parse_operations(&input) {
+        let input: PatchHashlineInput = match serde_json::from_value(input) {
+            Ok(input) => input,
+            Err(error) => {
+                let message = format!("invalid patch_hashline input: {error}");
+                let output = ToolOutput::Failure {
+                    content: syntax_error(&message),
+                };
+                add_tool_note(
+                    &context,
+                    NoteContent::Alert {
+                        content: format!("Patch failed: {message}"),
+                    },
+                    "patch_hashline",
+                )
+                .await?;
+                return Ok(output);
+            }
+        };
+        let operations = match parse_operations(input) {
             Ok(operations) => operations,
             Err(message) => {
                 let output = ToolOutput::Failure {
@@ -187,7 +244,8 @@ impl Tool for ToolPatchHashline {
                 return Err(Error::Cancelled);
             }
             let result = context
-                .workdir
+                .operations
+                .workdir()?
                 .write(
                     Path::new(path),
                     plan.content.as_deref().unwrap_or_default().as_bytes(),
@@ -352,7 +410,8 @@ async fn collect_snapshots(
 }
 
 async fn snapshot_file(context: &ToolContext, path: &str) -> Result<FileSnapshot> {
-    let exists = match context.workdir.exists(Path::new(path)).await {
+    let workdir = context.operations.workdir()?;
+    let exists = match workdir.exists(Path::new(path)).await {
         Ok(exists) => exists,
         Err(Error::Cancelled) => return Err(Error::Cancelled),
         Err(error) => {
@@ -372,7 +431,7 @@ async fn snapshot_file(context: &ToolContext, path: &str) -> Result<FileSnapshot
             error: None,
         });
     }
-    let bytes = match context.workdir.read(Path::new(path)).await {
+    let bytes = match workdir.read(Path::new(path)).await {
         Ok(bytes) => bytes,
         Err(Error::Cancelled) => return Err(Error::Cancelled),
         Err(error) => {
@@ -945,128 +1004,75 @@ fn format_anchor(anchor: &hashline::Anchor) -> String {
 
 pub fn parse_patch_hashline_freeform(input: &str) -> Result<Value> {
     let operations = parse_hashline_dsl(input).map_err(Error::Tool)?;
-    Ok(json!({
-        "operations": operations
-            .into_iter()
-            .map(operation_to_json)
-            .collect::<Vec<_>>()
-    }))
+    serde_json::to_value(PatchHashlineInput { operations })
+        .map_err(|error| Error::Tool(format!("invalid patch_hashline input: {error}")))
 }
 
-fn operation_to_json(operation: Operation) -> Value {
-    let path = operation.path;
-    match operation.kind {
-        OperationKind::InsertBefore => json!({
-            "kind": "insert_before",
-            "path": path,
-            "anchor": format_anchor(&operation.start.expect("insert anchor")),
-            "lines": operation.body.lines().map(str::to_string).collect::<Vec<_>>()
-        }),
-        OperationKind::InsertAfter => json!({
-            "kind": "insert_after",
-            "path": path,
-            "anchor": format_anchor(&operation.start.expect("insert anchor")),
-            "lines": operation.body.lines().map(str::to_string).collect::<Vec<_>>()
-        }),
-        OperationKind::Replace => json!({
-            "kind": "replace",
-            "path": path,
-            "anchor_start": format_anchor(&operation.start.expect("replace start anchor")),
-            "anchor_end": format_anchor(&operation.end.expect("replace end anchor")),
-            "lines": operation.body.lines().map(str::to_string).collect::<Vec<_>>()
-        }),
-        OperationKind::Delete => json!({
-            "kind": "delete",
-            "path": path,
-            "anchor_start": format_anchor(&operation.start.expect("delete start anchor")),
-            "anchor_end": format_anchor(&operation.end.expect("delete end anchor"))
-        }),
-    }
-}
-
-fn parse_operations(input: &Value) -> std::result::Result<Vec<Operation>, String> {
-    let operations = input
-        .get("operations")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "patch_hashline requires operations array".to_string())?;
-    operations
+fn parse_operations(input: PatchHashlineInput) -> std::result::Result<Vec<Operation>, String> {
+    input
+        .operations
         .iter()
         .enumerate()
         .map(|(index, operation)| {
-            parse_json_operation(operation)
+            operation_to_domain(operation)
                 .map_err(|error| format!("{error} in operation {}", index + 1))
         })
         .collect()
 }
 
-fn parse_json_operation(value: &Value) -> std::result::Result<Operation, String> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| "operation must be an object".to_string())?;
-    let kind = object
-        .get("kind")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "operation requires kind".to_string())?;
-    let path = object
-        .get("path")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "operation requires path".to_string())
-        .and_then(parse_path)?;
-    let anchor = |field: &str| {
-        object
-            .get(field)
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("operation requires {field}"))
-            .and_then(parse_anchor)
-    };
-    let lines = || {
-        object
-            .get("lines")
-            .and_then(Value::as_array)
-            .ok_or_else(|| "operation requires lines".to_string())?
-            .iter()
-            .map(|line| {
-                line.as_str()
-                    .map(str::to_string)
-                    .ok_or_else(|| "lines must contain only strings".to_string())
-            })
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map(|lines| lines.join("\n"))
-    };
-    match kind {
-        "insert_before" => Ok(Operation {
+fn operation_to_domain(
+    operation: &PatchHashlineOperation,
+) -> std::result::Result<Operation, String> {
+    match operation {
+        PatchHashlineOperation::InsertBefore {
+            path,
+            anchor,
+            lines,
+        } => Ok(Operation {
             kind: OperationKind::InsertBefore,
-            path,
-            start: Some(anchor("anchor")?),
+            path: parse_path(path)?,
+            start: Some(parse_anchor(anchor)?),
             end: None,
-            body: lines()?,
+            body: lines.join("\n"),
         }),
-        "insert_after" => Ok(Operation {
+        PatchHashlineOperation::InsertAfter {
+            path,
+            anchor,
+            lines,
+        } => Ok(Operation {
             kind: OperationKind::InsertAfter,
-            path,
-            start: Some(anchor("anchor")?),
+            path: parse_path(path)?,
+            start: Some(parse_anchor(anchor)?),
             end: None,
-            body: lines()?,
+            body: lines.join("\n"),
         }),
-        "replace" => Ok(Operation {
+        PatchHashlineOperation::Replace {
+            path,
+            anchor_start,
+            anchor_end,
+            lines,
+        } => Ok(Operation {
             kind: OperationKind::Replace,
-            path,
-            start: Some(anchor("anchor_start")?),
-            end: Some(anchor("anchor_end")?),
-            body: lines()?,
+            path: parse_path(path)?,
+            start: Some(parse_anchor(anchor_start)?),
+            end: Some(parse_anchor(anchor_end)?),
+            body: lines.join("\n"),
         }),
-        "delete" => Ok(Operation {
-            kind: OperationKind::Delete,
+        PatchHashlineOperation::Delete {
             path,
-            start: Some(anchor("anchor_start")?),
-            end: Some(anchor("anchor_end")?),
+            anchor_start,
+            anchor_end,
+        } => Ok(Operation {
+            kind: OperationKind::Delete,
+            path: parse_path(path)?,
+            start: Some(parse_anchor(anchor_start)?),
+            end: Some(parse_anchor(anchor_end)?),
             body: String::new(),
         }),
-        _ => Err("kind must be insert_before, insert_after, replace, or delete".into()),
     }
 }
 
-fn parse_hashline_dsl(text: &str) -> std::result::Result<Vec<Operation>, String> {
+fn parse_hashline_dsl(text: &str) -> std::result::Result<Vec<PatchHashlineOperation>, String> {
     let mut operations = Vec::new();
     let mut lines = text.split_inclusive('\n').enumerate();
     while let Some((line_number, raw_line)) = lines.next() {
@@ -1077,13 +1083,7 @@ fn parse_hashline_dsl(text: &str) -> std::result::Result<Vec<Operation>, String>
         let header = parse_header(line)
             .map_err(|message| format!("{message} at line {}", line_number + 1))?;
         let Some(delimiter) = header.delimiter.clone() else {
-            operations.push(Operation {
-                kind: header.kind,
-                path: header.path,
-                start: header.start,
-                end: header.end,
-                body: String::new(),
-            });
+            operations.push(freeform_operation(header, String::new()));
             continue;
         };
 
@@ -1103,13 +1103,7 @@ fn parse_hashline_dsl(text: &str) -> std::result::Result<Vec<Operation>, String>
                 line_number + 1
             ));
         }
-        operations.push(Operation {
-            kind: header.kind,
-            path: header.path,
-            start: header.start,
-            end: header.end,
-            body,
-        });
+        operations.push(freeform_operation(header, body));
     }
     Ok(operations)
 }
@@ -1125,6 +1119,33 @@ struct OperationHeader {
     start: Option<hashline::Anchor>,
     end: Option<hashline::Anchor>,
     delimiter: Option<String>,
+}
+
+fn freeform_operation(header: OperationHeader, body: String) -> PatchHashlineOperation {
+    let lines = body.lines().map(str::to_string).collect();
+    match header.kind {
+        OperationKind::InsertBefore => PatchHashlineOperation::InsertBefore {
+            path: header.path,
+            anchor: format_anchor(&header.start.expect("insert anchor")),
+            lines,
+        },
+        OperationKind::InsertAfter => PatchHashlineOperation::InsertAfter {
+            path: header.path,
+            anchor: format_anchor(&header.start.expect("insert anchor")),
+            lines,
+        },
+        OperationKind::Replace => PatchHashlineOperation::Replace {
+            path: header.path,
+            anchor_start: format_anchor(&header.start.expect("replace start anchor")),
+            anchor_end: format_anchor(&header.end.expect("replace end anchor")),
+            lines,
+        },
+        OperationKind::Delete => PatchHashlineOperation::Delete {
+            path: header.path,
+            anchor_start: format_anchor(&header.start.expect("delete start anchor")),
+            anchor_end: format_anchor(&header.end.expect("delete end anchor")),
+        },
+    }
 }
 
 fn parse_header(line: &str) -> std::result::Result<OperationHeader, String> {
@@ -1292,6 +1313,8 @@ impl Plugin for ToolPatchHashlinePlugin {
 impl ConfigReadHook for ToolPatchHashlinePlugin {
     async fn config_read(&self, context: ConfigReadContext) -> Result<()> {
         if context.config.tool.enable_hashline {
+            let hook: Arc<dyn BuildFileContextHook> = Arc::new(HashlineFileContextHook);
+            context.registry.register_hook(hook)?;
             context
                 .registry
                 .register_tool(Arc::new(ToolPatchHashline::new()), 0)
@@ -1306,14 +1329,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn definition_uses_the_dedicated_patch_prompt() {
+    fn definition_uses_mode_specific_patch_prompts() {
         let definition = ToolPatchHashline::new().definition();
 
         assert_eq!(
             definition.description,
+            include_str!("../prompts/tool_patch_hashline.txt")
+        );
+        assert_eq!(
+            definition.input.freeform.as_ref().unwrap().description,
             include_str!("../prompts/tool_patch_hashline_freeform.txt")
         );
-        assert!(definition.input.freeform_parser.is_some());
+    }
+
+    #[test]
+    fn definition_generates_a_tagged_operation_schema() {
+        let schema = ToolPatchHashline::new()
+            .definition()
+            .input
+            .schema
+            .to_string();
+
+        assert!(schema.contains("oneOf"));
+        assert!(schema.contains("insert_before"));
+        assert!(schema.contains("insert_after"));
+        assert!(schema.contains("anchor_start"));
+        assert!(schema.contains("anchor_end"));
     }
 
     #[test]

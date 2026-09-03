@@ -188,7 +188,7 @@ async fn collect_files(context: &ToolContext, path: &Path, files: &mut Vec<Strin
         if context.cancellation.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        let entries = context.workdir.list(&directory).await?;
+        let entries = context.operations.workdir()?.list(&directory).await?;
         for entry in entries {
             if entry
                 .path

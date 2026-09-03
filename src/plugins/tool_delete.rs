@@ -58,7 +58,7 @@ impl Tool for ToolDelete {
         if context.cancellation.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        let output = match context.workdir.remove(Path::new(path)).await {
+        let output = match context.operations.workdir()?.remove(Path::new(path)).await {
             Ok(()) => ToolOutput::Success {
                 content: format!("Deleted {path}"),
             },
