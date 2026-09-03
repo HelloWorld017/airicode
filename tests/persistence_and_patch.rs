@@ -3,37 +3,59 @@ use std::{path::Path, sync::Arc};
 use airicode::{
     Result,
     core::{
-        SessionHandle, SessionRuntimeDeps, Tool,
+        CoreBuilder, Plugin, SessionHandle, Tool,
         models::{
-            ContextPriority, Message, MessagePart, ProviderId, Role, SessionGroupId, SessionId,
-            SessionState, ToolContext, ToolOutput, TurnId,
+            ContextPriority, Message, MessagePart, PluginId, ProviderId, Role, SessionGroupId,
+            SessionId, SessionState, ToolContext, ToolOutput, TurnId,
         },
         persistence::SessionStore,
         project_from_path,
-        registry::Registry,
+        registry::PluginRegistryScope,
         workdir::{NativeWorkdir, Workdir},
     },
     plugins::{JsonlSessionStore, ToolPatch, ToolPatchApplyPatch, ToolPatchHashline, ToolWrite},
     utils::hashline,
 };
+use async_trait::async_trait;
 use serde_json::json;
 use tempfile::tempdir;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
-fn spawn_session(
+struct SessionStorePlugin {
+    id: PluginId,
+    store: Arc<dyn SessionStore>,
+}
+
+#[async_trait]
+impl Plugin for SessionStorePlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &str {
+        "test_session_store"
+    }
+
+    async fn init(self: Arc<Self>, registry: PluginRegistryScope) -> Result<()> {
+        registry.register_session_store(self.store.clone(), 0)?;
+        Ok(())
+    }
+}
+
+async fn spawn_session(
     directory: &tempfile::TempDir,
     state: SessionState,
     store: Option<Arc<dyn SessionStore>>,
 ) -> Result<SessionHandle> {
-    SessionHandle::spawn(
-        state,
-        SessionRuntimeDeps {
-            registry: Registry::new(),
-            project: project_from_path(directory.path().to_path_buf()),
+    let mut builder = CoreBuilder::new().project(project_from_path(directory.path().to_path_buf()));
+    if let Some(store) = store {
+        builder = builder.plugin(Arc::new(SessionStorePlugin {
+            id: PluginId::new(),
             store,
-        },
-    )
+        }));
+    }
+    builder.build().await?.open_session(state)
 }
 
 #[tokio::test]
@@ -41,7 +63,7 @@ async fn jsonl_store_replays_and_recovers_an_incomplete_tail() -> Result<()> {
     let directory = tempdir()?;
     let group_id = SessionGroupId::new();
     let session_id = SessionId::new(group_id);
-    let session = spawn_session(&directory, SessionState::new(session_id, group_id), None)?;
+    let session = spawn_session(&directory, SessionState::new(session_id, group_id), None).await?;
     session
         .operations()
         .add_conversation_message(
@@ -55,7 +77,8 @@ async fn jsonl_store_replays_and_recovers_an_incomplete_tail() -> Result<()> {
         &directory,
         SessionState::new(session_id, state.group_id),
         Some(Arc::new(persisted.clone())),
-    )?;
+    )
+    .await?;
     handle
         .operations()
         .add_message(Message::text(Role::Assistant, "durable", "build", None))
@@ -95,7 +118,8 @@ async fn persisted_session_actor_does_not_advance_when_append_fails() -> Result<
         &directory,
         SessionState::new(SessionId::new(group_id), group_id),
         Some(Arc::new(store)),
-    )?;
+    )
+    .await?;
     assert!(
         session
             .operations()
@@ -117,7 +141,8 @@ async fn provider_data_survives_jsonl_persistence_round_trip() -> Result<()> {
         &directory,
         SessionState::new(session_id, group_id),
         Some(Arc::new(store.clone())),
-    )?;
+    )
+    .await?;
     let provider_id = ProviderId::new();
     let native_item = json!({
         "type": "reasoning",
@@ -146,13 +171,14 @@ async fn provider_data_survives_jsonl_persistence_round_trip() -> Result<()> {
     Ok(())
 }
 
-fn context(directory: &tempfile::TempDir) -> Result<(SessionHandle, ToolContext)> {
+async fn context(directory: &tempfile::TempDir) -> Result<(SessionHandle, ToolContext)> {
     let group_id = SessionGroupId::new();
     let session = spawn_session(
         directory,
         SessionState::new(SessionId::new(group_id), group_id),
         None,
-    )?;
+    )
+    .await?;
     let context = ToolContext {
         turn_id: TurnId::new(),
         operations: session.operations(),
@@ -168,7 +194,7 @@ async fn patch_matches_all_replacements_against_one_snapshot() -> Result<()> {
     workdir
         .write(Path::new("main.txt"), b"first one\nsecond two\n")
         .await?;
-    let (_session, context) = context(&directory)?;
+    let (_session, context) = context(&directory).await?;
     let output = ToolPatch::new()
         .execute(
             json!({
@@ -194,7 +220,7 @@ async fn patch_rejects_non_unique_or_overlapping_edits_without_writing() -> Resu
     let directory = tempdir()?;
     let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
     workdir.write(Path::new("main.txt"), b"abc abc\n").await?;
-    let (_first_session, first_context) = context(&directory)?;
+    let (_first_session, first_context) = context(&directory).await?;
     let output = ToolPatch::new()
         .execute(
             json!({
@@ -208,7 +234,7 @@ async fn patch_rejects_non_unique_or_overlapping_edits_without_writing() -> Resu
     assert_eq!(workdir.read(Path::new("main.txt")).await?, b"abc abc\n");
 
     workdir.write(Path::new("main.txt"), b"abcdef\n").await?;
-    let (_second_session, second_context) = context(&directory)?;
+    let (_second_session, second_context) = context(&directory).await?;
     let output = ToolPatch::new()
         .execute(
             json!({
@@ -236,7 +262,7 @@ async fn hashline_patch_json_and_freeform_inputs_share_the_executor() -> Result<
         .write(Path::new("main.txt"), original.as_bytes())
         .await?;
     let tool = ToolPatchHashline::new();
-    let (_first_session, first_context) = context(&directory)?;
+    let (_first_session, first_context) = context(&directory).await?;
     tool.execute(
         json!({
             "operations": [{
@@ -263,7 +289,7 @@ async fn hashline_patch_json_and_freeform_inputs_share_the_executor() -> Result<
             "DELETE main.txt FROM {}:{} TO {}:{}",
             fresh[1].line, fresh[1].tag, fresh[1].line, fresh[1].tag
         ))?;
-    let (_second_session, second_context) = context(&directory)?;
+    let (_second_session, second_context) = context(&directory).await?;
     tool.execute(input, second_context).await?;
     assert_eq!(workdir.read(Path::new("main.txt")).await?, b"one\nthree\n");
     Ok(())
@@ -273,7 +299,7 @@ async fn hashline_patch_json_and_freeform_inputs_share_the_executor() -> Result<
 async fn apply_patch_supports_file_lifecycle_operations() -> Result<()> {
     let directory = tempdir()?;
     let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
-    let (_session, ctx) = context(&directory)?;
+    let (_session, ctx) = context(&directory).await?;
     ToolWrite::new()
         .execute(
             json!({ "path": "main.txt", "content": "before\n" }),

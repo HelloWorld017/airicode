@@ -17,7 +17,7 @@ use super::{
     },
     operations::Operations,
     registry::Registry,
-    session::SessionRuntime,
+    session::SessionHost,
 };
 
 #[derive(Clone)]
@@ -48,20 +48,20 @@ impl TurnRequest {
 
 #[derive(Clone)]
 pub struct TurnEngine {
-    runtime: Arc<SessionRuntime>,
+    host: Arc<SessionHost>,
 }
 
 impl TurnEngine {
-    pub(crate) fn from_runtime(runtime: Arc<SessionRuntime>) -> Self {
-        Self { runtime }
+    pub(crate) fn from_host(host: Arc<SessionHost>) -> Self {
+        Self { host }
     }
 
-    fn registry(&self) -> &Registry {
-        self.runtime.registry()
+    fn registry(&self) -> Registry {
+        self.host.core().registry()
     }
 
     fn operations(&self) -> Operations {
-        self.runtime.operations()
+        self.host.operations()
     }
 
     pub async fn run(&self, request: TurnRequest) -> Result<TurnId> {

@@ -3,13 +3,12 @@ use std::{path::Path, sync::Arc, time::Duration};
 use airicode::{
     Result,
     core::{
-        SessionHandle, SessionRuntimeDeps, Tool,
+        CoreBuilder, SessionHandle, Tool,
         models::{
             MessagePart, ProviderEvent, ProviderId, Role, RuntimeEvent, SessionGroupId, SessionId,
             SessionState, ToolContext, ToolOutput, TurnId,
         },
         project_from_path,
-        registry::Registry,
         runtime::TurnRequest,
         workdir::{NativeWorkdir, Workdir},
     },
@@ -27,15 +26,13 @@ mod utils;
 
 use utils::{FakeProvider, FakeProviderPlugin};
 
-fn tool_context(directory: &tempfile::TempDir) -> Result<(SessionHandle, ToolContext)> {
+async fn tool_context(directory: &tempfile::TempDir) -> Result<(SessionHandle, ToolContext)> {
     let group_id = SessionGroupId::new();
-    let session = SessionHandle::spawn(
-        SessionState::new(SessionId::new(group_id), group_id),
-        SessionRuntimeDeps::new(
-            Registry::new(),
-            project_from_path(directory.path().to_path_buf()),
-        ),
-    )?;
+    let core = CoreBuilder::new()
+        .project(project_from_path(directory.path().to_path_buf()))
+        .build()
+        .await?;
+    let session = core.open_session(SessionState::new(SessionId::new(group_id), group_id))?;
     let context = ToolContext {
         turn_id: TurnId::new(),
         operations: session.operations(),
@@ -70,7 +67,7 @@ async fn read_and_shell_tools_use_the_shared_workdir_contract() -> Result<()> {
     workdir
         .write(Path::new("main.rs"), b"fn main() {}\n")
         .await?;
-    let (_session, context) = tool_context(&directory)?;
+    let (_session, context) = tool_context(&directory).await?;
 
     let read = ToolRead::new();
     let output = read
@@ -102,7 +99,7 @@ async fn read_suggests_a_corrected_path_and_grep_accepts_an_empty_path() -> Resu
     workdir
         .write(Path::new("src/main.rs"), b"before\nneedle\nafter\n")
         .await?;
-    let (_session, context) = tool_context(&directory)?;
+    let (_session, context) = tool_context(&directory).await?;
 
     let read = ToolRead::new();
     let output = read
@@ -166,23 +163,21 @@ async fn file_context_hook_uses_full_source_for_read_and_grep() -> Result<()> {
 }
 
 #[tokio::test]
-async fn operations_handle_does_not_keep_runtime_alive() -> Result<()> {
+async fn operations_handle_does_not_keep_host_alive() -> Result<()> {
     let directory = tempdir()?;
     let group_id = SessionGroupId::new();
     let operations = {
-        let session = SessionHandle::spawn(
-            SessionState::new(SessionId::new(group_id), group_id),
-            SessionRuntimeDeps::new(
-                Registry::new(),
-                project_from_path(directory.path().to_path_buf()),
-            ),
-        )?;
+        let core = CoreBuilder::new()
+            .project(project_from_path(directory.path().to_path_buf()))
+            .build()
+            .await?;
+        let session = core.open_session(SessionState::new(SessionId::new(group_id), group_id))?;
         session.operations()
     };
 
     assert!(matches!(
         operations.snapshot().await,
-        Err(airicode::Error::Session(message)) if message == "session runtime is no longer available"
+        Err(airicode::Error::Session(message)) if message == "session host is no longer available"
     ));
     Ok(())
 }
@@ -194,7 +189,7 @@ async fn find_file_supports_exact_keyword_and_glob_queries() -> Result<()> {
     std::fs::write(directory.path().join("src/main.rs"), "fn main() {}")?;
     std::fs::write(directory.path().join("src/models/Message.rs"), "model")?;
     std::fs::write(directory.path().join("README.md"), "readme")?;
-    let (_session, context) = tool_context(&directory)?;
+    let (_session, context) = tool_context(&directory).await?;
 
     let find = ToolFindFile::new();
     let output = find

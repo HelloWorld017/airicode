@@ -6,14 +6,14 @@ use crate::core::{
 
 impl Operations {
     pub fn project_id(&self) -> Result<ProjectId> {
-        Ok(self.runtime()?.project_id())
+        Ok(self.project()?.id)
     }
 
     pub fn session_id(&self) -> Result<SessionId> {
-        Ok(self.runtime()?.session_id())
+        Ok(self.host()?.session_id())
     }
 
     pub fn group_id(&self) -> Result<SessionGroupId> {
-        Ok(self.runtime()?.group_id())
+        Ok(self.host()?.group_id())
     }
 }

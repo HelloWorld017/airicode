@@ -8,7 +8,7 @@ use crate::core::models::{
 
 impl Operations {
     pub async fn snapshot(&self) -> Result<SessionState> {
-        let sender = self.runtime()?.sender();
+        let sender = self.host()?.sender();
         let (response, receiver) = oneshot::channel();
         sender
             .send(SessionRequest::Snapshot { response })
@@ -23,7 +23,7 @@ impl Operations {
         if mutations.is_empty() {
             return Err(Error::InvalidState("empty session commit".into()));
         }
-        let sender = self.runtime()?.sender();
+        let sender = self.host()?.sender();
         let (response, receiver) = oneshot::channel();
         sender
             .send(SessionRequest::Commit {
@@ -53,7 +53,7 @@ impl Operations {
     }
 
     pub(crate) async fn emit(&self, event: RuntimeEvent) -> Result<()> {
-        let _ = self.runtime()?.events().send(event);
+        let _ = self.host()?.events().send(event);
         Ok(())
     }
 }

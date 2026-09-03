@@ -9,7 +9,6 @@ use super::{
     models::{Plugin, Project, ProjectId, SessionGroupId, SessionId, SessionState},
     operations::SessionHandle,
     registry::Registry,
-    session::SessionRuntimeDeps,
     shell::ShellActionHandler,
 };
 
@@ -71,18 +70,24 @@ impl CoreBuilder {
             }
         }
         Ok(Core {
-            registry,
-            config,
-            project: self.project,
+            inner: Arc::new(CoreInner {
+                registry,
+                config,
+                project: self.project,
+            }),
         })
     }
 }
 
 #[derive(Clone)]
 pub struct Core {
-    pub registry: Registry,
-    pub config: Config,
-    pub project: Option<Project>,
+    inner: Arc<CoreInner>,
+}
+
+struct CoreInner {
+    registry: Registry,
+    config: Config,
+    project: Option<Project>,
 }
 
 impl Default for Core {
@@ -94,14 +99,29 @@ impl Default for Core {
 impl Core {
     pub fn new() -> Self {
         Self {
-            registry: Registry::new(),
-            config: Config::default(),
-            project: None,
+            inner: Arc::new(CoreInner {
+                registry: Registry::new(),
+                config: Config::default(),
+                project: None,
+            }),
         }
     }
+
     pub fn registry(&self) -> Registry {
-        self.registry.clone()
+        self.inner.registry.clone()
     }
+
+    pub fn config(&self) -> &Config {
+        &self.inner.config
+    }
+
+    pub fn project(&self) -> Result<Project> {
+        self.inner
+            .project
+            .clone()
+            .ok_or_else(|| Error::Session("sessions require a project".into()))
+    }
+
     pub fn shell_action_handler(&self) -> ShellActionHandler {
         ShellActionHandler::new(self.registry())
     }
@@ -110,18 +130,7 @@ impl Core {
     }
 
     pub fn open_session(&self, state: SessionState) -> Result<SessionHandle> {
-        let project = self
-            .project
-            .clone()
-            .ok_or_else(|| Error::Session("sessions require a project".into()))?;
-        SessionHandle::spawn(
-            state,
-            SessionRuntimeDeps {
-                registry: self.registry.clone(),
-                project,
-                store: self.registry.session_store(),
-            },
-        )
+        SessionHandle::spawn(state, self.clone())
     }
 
     pub async fn load_session(
@@ -132,7 +141,7 @@ impl Core {
         let state = SessionState::replay(
             session_id,
             group_id,
-            match self.registry.session_store() {
+            match self.registry().session_store() {
                 Some(store) => store.load(session_id).await?,
                 None => Vec::new(),
             },

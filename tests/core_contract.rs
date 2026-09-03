@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use airicode::core::{
-    SessionHandle, SessionRuntimeDeps, Tool,
+    CoreBuilder, Tool,
     models::{
         ContextPriority, ContextSource, Message, MessagePart, Role, SessionGroupId, SessionId,
         SessionMutation, SessionState, ShellAction, ShellActionContext, ShellActionDefinition,
@@ -107,19 +107,22 @@ fn context_is_sorted_by_time_sequence_not_priority() -> airicode::Result<()> {
 async fn actor_commits_message_and_context_as_one_operation() -> airicode::Result<()> {
     let group_id = SessionGroupId::new();
     let directory = tempfile::tempdir()?;
-    let session = SessionHandle::spawn(
-        SessionState::new(SessionId::new(group_id), group_id),
-        SessionRuntimeDeps::new(
-            Registry::new(),
-            project_from_path(directory.path().to_path_buf()),
-        ),
-    )?;
+    let project = project_from_path(directory.path().to_path_buf());
+    let core = CoreBuilder::new()
+        .project(project.clone())
+        .config(json!({ "tool": { "enable_hashline": true } }))
+        .build()
+        .await?;
+    let session = core.open_session(SessionState::new(SessionId::new(group_id), group_id))?;
+    let operations = session.operations();
+    assert_eq!(operations.project()?, project);
+    assert_eq!(operations.project_id()?, project.id);
+    assert!(operations.config()?.tool.enable_hashline);
     let message = Message::text(Role::User, "atomic", "build", None);
-    let (message_id, context_id) = session
-        .operations()
+    let (message_id, context_id) = operations
         .add_conversation_message(message, ContextPriority::High)
         .await?;
-    let state = session.operations().snapshot().await?;
+    let state = operations.snapshot().await?;
     assert!(state.messages.contains_key(&message_id));
     assert!(state.context.contains_key(&context_id));
     assert_eq!(state.last_sequence, 1);

@@ -24,5 +24,5 @@ pub use operations::{Operations, SessionHandle};
 pub use persistence::SessionStore;
 pub use registry::{PluginRegistryScope, RegistrationHandle, Registry};
 pub use runtime::{TurnEngine, TurnRequest};
-pub use session::{SessionRuntime, SessionRuntimeDeps};
+pub use session::SessionHost;
 pub use shell::ShellActionHandler;

@@ -14,12 +14,16 @@ use std::sync::{Arc, Weak};
 
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
-use super::models::{RuntimeEvent, SessionCommit, SessionMutation, SessionState};
 use super::persistence::SessionStore;
+use super::{
+    config::Config,
+    models::{Project, RuntimeEvent, SessionCommit, SessionMutation, SessionState},
+    registry::Registry,
+};
 use super::{
     error::{Error, Result},
     runtime::TurnEngine,
-    session::{SessionRuntime, SessionRuntimeDeps},
+    session::SessionHost,
     workdir::Workdir,
 };
 
@@ -36,39 +40,39 @@ pub(crate) enum SessionRequest {
 
 #[derive(Clone)]
 pub struct Operations {
-    runtime: Weak<SessionRuntime>,
+    host: Weak<SessionHost>,
 }
 
 #[derive(Clone)]
 pub struct SessionHandle {
-    runtime: Arc<SessionRuntime>,
+    host: Arc<SessionHost>,
 }
 
 impl SessionHandle {
-    pub fn spawn(state: SessionState, deps: SessionRuntimeDeps) -> Result<Self> {
+    pub fn spawn(state: SessionState, core: super::core::Core) -> Result<Self> {
         Ok(Self {
-            runtime: SessionRuntime::spawn(state, deps)?,
+            host: SessionHost::spawn(state, core)?,
         })
     }
 
     pub fn operations(&self) -> Operations {
-        self.runtime.operations()
+        self.host.operations()
     }
 
     pub fn turn_engine(&self) -> TurnEngine {
-        self.runtime.turn_engine()
+        self.host.turn_engine()
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> {
-        self.runtime.events().subscribe()
+        self.host.events().subscribe()
     }
 
     pub fn snapshot(&self) -> SessionState {
-        self.runtime.snapshot().borrow().clone()
+        self.host.snapshot().borrow().clone()
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        self.runtime
+        self.host
             .sender()
             .send(SessionRequest::Shutdown)
             .await
@@ -78,18 +82,30 @@ impl SessionHandle {
 }
 
 impl Operations {
-    pub(crate) fn from_runtime(runtime: Weak<SessionRuntime>) -> Self {
-        Self { runtime }
+    pub(crate) fn from_host(host: Weak<SessionHost>) -> Self {
+        Self { host }
     }
 
-    pub(crate) fn runtime(&self) -> Result<Arc<SessionRuntime>> {
-        self.runtime
+    pub(crate) fn host(&self) -> Result<Arc<SessionHost>> {
+        self.host
             .upgrade()
-            .ok_or_else(|| Error::Session("session runtime is no longer available".into()))
+            .ok_or_else(|| Error::Session("session host is no longer available".into()))
+    }
+
+    pub fn project(&self) -> Result<Project> {
+        self.host()?.core().project()
+    }
+
+    pub fn config(&self) -> Result<Config> {
+        Ok(self.host()?.core().config().clone())
+    }
+
+    pub(crate) fn registry(&self) -> Result<Registry> {
+        Ok(self.host()?.core().registry())
     }
 
     pub(crate) fn workdir(&self) -> Result<Arc<dyn Workdir>> {
-        Ok(self.runtime()?.workdir())
+        Ok(self.host()?.workdir())
     }
 }
 

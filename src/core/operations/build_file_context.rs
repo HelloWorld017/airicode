@@ -13,8 +13,7 @@ impl Operations {
         &self,
         request: BuildFileContextRequest,
     ) -> Result<FileContext> {
-        let runtime = self.runtime()?;
-        let bytes = runtime.workdir().read(&request.path).await?;
+        let bytes = self.workdir()?.read(&request.path).await?;
         if bytes.contains(&0) {
             return Err(Error::Tool(
                 "cannot read binary/NUL-containing input".into(),
@@ -79,7 +78,7 @@ impl Operations {
             path: request.path,
             source,
         };
-        for (_, hook) in runtime.registry().hooks().build_file_context.clone() {
+        for (_, hook) in self.registry()?.hooks().build_file_context.clone() {
             hook.augment_file_context(hook_context.clone(), &mut file_context)
                 .await?;
         }

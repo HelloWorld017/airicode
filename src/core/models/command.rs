@@ -5,8 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::super::error::Result;
 use super::super::operations::Operations;
-use super::id::{CommandId, ProjectId, SessionGroupId, SessionId};
-use super::workdir::Workdir;
+use super::id::CommandId;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CommandDefinition {
@@ -28,11 +27,7 @@ pub struct Completion {
 
 #[derive(Clone)]
 pub struct CommandContext {
-    pub project_id: ProjectId,
-    pub session_group_id: SessionGroupId,
-    pub session_id: SessionId,
     pub operations: Operations,
-    pub workdir: std::sync::Arc<dyn Workdir>,
     pub cancellation: CancellationToken,
 }
 

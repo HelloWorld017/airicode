@@ -34,7 +34,7 @@ async fn openai_provider_is_created_by_config_read() -> Result<()> {
     let core = core?;
 
     assert!(plugin.provider().is_some());
-    assert!(core.registry.provider(plugin.provider_id()).is_some());
+    assert!(core.registry().provider(plugin.provider_id()).is_some());
     Ok(())
 }
 
@@ -50,9 +50,9 @@ async fn persistence_store_is_created_by_open_project() -> Result<()> {
         .build()
         .await?;
 
-    assert_eq!(core.project, Some(project));
+    assert_eq!(core.project()?, project);
     assert!(plugin.store().is_some());
-    assert!(core.registry.session_store().is_some());
+    assert!(core.registry().session_store().is_some());
     assert!(plugin.discover().await?.is_empty());
     Ok(())
 }
@@ -68,7 +68,7 @@ async fn hashline_config_selects_hashline_tools() -> Result<()> {
         .build()
         .await?;
     let names = core
-        .registry
+        .registry()
         .tools()
         .into_iter()
         .map(|tool| tool.definition().name)
