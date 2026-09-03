@@ -1,5 +1,126 @@
-use super::error::{Error, Result};
-use super::models::{ContextSource, SessionCommit, SessionMutation, SessionState};
+use std::sync::Arc;
+
+use tokio::sync::{broadcast, mpsc, watch};
+
+use super::{
+    error::{Error, Result},
+    models::{
+        ContextSource, Project, ProjectId, RuntimeEvent, SessionCommit, SessionGroupId, SessionId,
+        SessionMutation, SessionState, WorkdirLayerContext,
+    },
+    operations::{Operations, SessionRequest, run_actor},
+    persistence::SessionStore,
+    registry::Registry,
+    workdir::{NativeWorkdir, Workdir},
+};
+
+pub struct SessionRuntimeDeps {
+    pub registry: Registry,
+    pub project: Project,
+    pub store: Option<Arc<dyn SessionStore>>,
+}
+
+impl SessionRuntimeDeps {
+    pub fn new(registry: Registry, project: Project) -> Self {
+        Self {
+            registry,
+            project,
+            store: None,
+        }
+    }
+}
+
+pub struct SessionRuntime {
+    project_id: ProjectId,
+    session_id: SessionId,
+    group_id: SessionGroupId,
+    registry: Registry,
+    workdir: Arc<dyn Workdir>,
+    store: Option<Arc<dyn SessionStore>>,
+    sender: mpsc::Sender<SessionRequest>,
+    snapshot: watch::Receiver<SessionState>,
+    events: broadcast::Sender<RuntimeEvent>,
+}
+
+impl SessionRuntime {
+    pub fn spawn(state: SessionState, deps: SessionRuntimeDeps) -> Result<Arc<Self>> {
+        let base: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(&deps.project.root)?);
+        let workdir = deps.registry.layer_workdir(
+            &WorkdirLayerContext {
+                project_id: deps.project.id,
+                project_name: deps.project.name.clone(),
+                session_group_id: state.group_id,
+            },
+            base,
+        );
+        let (sender, receiver) = mpsc::channel(64);
+        let (snapshot_tx, snapshot) = watch::channel(state.clone());
+        let (events, _) = broadcast::channel(256);
+        let runtime = Arc::new(Self {
+            project_id: deps.project.id,
+            session_id: state.session_id,
+            group_id: state.group_id,
+            registry: deps.registry,
+            workdir,
+            store: deps.store,
+            sender,
+            snapshot,
+            events,
+        });
+        tokio::spawn(run_actor(
+            state,
+            receiver,
+            snapshot_tx,
+            runtime.events(),
+            runtime.store(),
+        ));
+        Ok(runtime)
+    }
+
+    pub fn operations(self: &Arc<Self>) -> Operations {
+        Operations::from_runtime(Arc::downgrade(self))
+    }
+
+    pub fn turn_engine(self: &Arc<Self>) -> super::runtime::TurnEngine {
+        super::runtime::TurnEngine::from_runtime(self.clone())
+    }
+
+    pub(crate) fn project_id(&self) -> ProjectId {
+        self.project_id
+    }
+
+    pub(crate) fn session_id(&self) -> SessionId {
+        self.session_id
+    }
+
+    pub(crate) fn group_id(&self) -> SessionGroupId {
+        self.group_id
+    }
+
+    pub(crate) fn registry(&self) -> &Registry {
+        &self.registry
+    }
+
+    pub(crate) fn workdir(&self) -> Arc<dyn Workdir> {
+        self.workdir.clone()
+    }
+
+    pub(crate) fn store(&self) -> Option<Arc<dyn SessionStore>> {
+        self.store.clone()
+    }
+
+    pub(crate) fn sender(&self) -> mpsc::Sender<SessionRequest> {
+        self.sender.clone()
+    }
+
+    pub(crate) fn snapshot(&self) -> &watch::Receiver<SessionState> {
+        &self.snapshot
+    }
+
+    pub(crate) fn events(&self) -> broadcast::Sender<RuntimeEvent> {
+        self.events.clone()
+    }
+}
 
 impl SessionState {
     pub fn new(

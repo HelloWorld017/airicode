@@ -18,7 +18,8 @@ use super::models::{RuntimeEvent, SessionCommit, SessionMutation, SessionState};
 use super::persistence::SessionStore;
 use super::{
     error::{Error, Result},
-    runtime::{SessionRuntime, SessionRuntimeDeps, TurnEngine},
+    runtime::TurnEngine,
+    session::{SessionRuntime, SessionRuntimeDeps},
     workdir::Workdir,
 };
 

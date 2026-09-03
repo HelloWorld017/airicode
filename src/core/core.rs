@@ -9,7 +9,7 @@ use super::{
     models::{Plugin, Project, ProjectId, SessionGroupId, SessionId, SessionState},
     operations::SessionHandle,
     registry::Registry,
-    runtime::SessionRuntimeDeps,
+    session::SessionRuntimeDeps,
     shell::ShellActionHandler,
 };
 
