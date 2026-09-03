@@ -7,7 +7,10 @@ use ratatui::{
 use serde_json::Value;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::core::models::{Message, MessagePartContent, Note, NoteContent, Role, SessionState};
+use crate::core::models::{
+    Message, MessageId, MessagePartContent, Note, NoteContent, NoteId, Role, SessionState,
+};
+use crate::utils::TimeSeq;
 
 use super::theme;
 
@@ -44,7 +47,7 @@ pub fn timeline_with_reasoning(
         TimelineEntry::Message(message) => message.created_at,
         TimelineEntry::Note(note) => note.created_at,
         TimelineEntry::StreamingAssistant { .. } | TimelineEntry::StreamingTool { .. } => {
-            crate::utils::TimeSeq::from_parts(u64::MAX, u16::MAX)
+            TimeSeq::from_parts(u64::MAX, u16::MAX)
         }
     });
     if let Some(text) = reasoning.filter(|text| !text.is_empty()) {
@@ -70,8 +73,8 @@ pub fn timeline_with_reasoning(
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TranscriptItemId {
-    Message(crate::core::models::MessageId),
-    Note(crate::core::models::NoteId),
+    Message(MessageId),
+    Note(NoteId),
     StreamingReasoning,
     StreamingAssistant,
 }
@@ -615,13 +618,12 @@ fn clipped_rect(item_y: i64, item_height: usize, clip: Rect) -> Option<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::models::{MessagePart, NoteId};
-    use crate::utils::TimeSeq;
+    use crate::core::models::{MessagePart, SessionGroupId, SessionId, ToolCallId};
     use std::collections::BTreeMap;
 
     fn state_with(entries: Vec<(TimeSeq, Message)>) -> SessionState {
-        let group_id = crate::core::models::SessionGroupId::new();
-        let mut state = SessionState::new(crate::core::models::SessionId::new(group_id), group_id);
+        let group_id = SessionGroupId::new();
+        let mut state = SessionState::new(SessionId::new(group_id), group_id);
         for (created_at, mut message) in entries {
             message.created_at = created_at;
             state.messages.insert(message.id, message);
@@ -636,7 +638,7 @@ mod tests {
             .metadata
             .insert("mode".into(), Value::String("plan".into()));
         message.content.push(MessagePart::tool_call(
-            crate::core::models::ToolCallId::new(),
+            ToolCallId::new(),
             "read".into(),
             Value::Null,
         ));
@@ -650,8 +652,8 @@ mod tests {
 
     #[test]
     fn notes_are_rendered_as_their_presentation_kind() {
-        let group_id = crate::core::models::SessionGroupId::new();
-        let mut state = SessionState::new(crate::core::models::SessionId::new(group_id), group_id);
+        let group_id = SessionGroupId::new();
+        let mut state = SessionState::new(SessionId::new(group_id), group_id);
         let note = Note {
             id: NoteId::new(),
             content: NoteContent::Subtle {

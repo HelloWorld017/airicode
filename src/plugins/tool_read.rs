@@ -14,7 +14,9 @@ use crate::{
         },
         registry::PluginRegistryScope,
     },
-    utils::{PathCorrectionKind, hashline, note::add_output_note, path_correction},
+    utils::{
+        PathCorrectionKind, hashline, note::add_output_note, path_correction, schema::json_schema,
+    },
 };
 
 #[allow(dead_code)]
@@ -73,7 +75,7 @@ impl Tool for ToolRead {
             } else {
                 "Read a UTF-8 text file from the current workdir and return numbered lines in the form `<line>|<content>`. `start_line` and `end_line` are optional inclusive line limits. Binary/NUL-containing files and requests beyond the configured size or line limits fail."
             }.into(),
-            input: ToolInputDefinition::new(crate::utils::schema::json_schema::<ReadInputSchema>()),
+            input: ToolInputDefinition::new(json_schema::<ReadInputSchema>()),
         }
     }
     async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {

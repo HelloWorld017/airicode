@@ -16,7 +16,7 @@ use crate::core::{
     models::{
         FinishReason, Message, MessagePart, MessagePartContent, Model, ModelCapabilities, Plugin,
         PluginId, Provider, ProviderEvent, ProviderId, ProviderRequest, ProviderStream, Role,
-        ToolCallId, Usage,
+        ToolCallId, ToolDefinition, Usage,
     },
     registry::PluginRegistryScope,
 };
@@ -209,11 +209,11 @@ fn responses_body(request: &ProviderRequest, provider_id: ProviderId, freeform: 
     })
 }
 
-fn uses_freeform(tool: &crate::core::models::ToolDefinition, freeform: bool) -> bool {
+fn uses_freeform(tool: &ToolDefinition, freeform: bool) -> bool {
     freeform && tool.input.freeform_parser.is_some()
 }
 
-fn responses_tool(tool: &crate::core::models::ToolDefinition, freeform: bool) -> Value {
+fn responses_tool(tool: &ToolDefinition, freeform: bool) -> Value {
     if uses_freeform(tool, freeform) {
         json!({
             "type": "custom",
@@ -231,9 +231,9 @@ fn responses_tool(tool: &crate::core::models::ToolDefinition, freeform: bool) ->
 }
 
 fn responses_input(
-    messages: &[std::sync::Arc<Message>],
+    messages: &[Arc<Message>],
     provider_id: ProviderId,
-    tools: &[crate::core::models::ToolDefinition],
+    tools: &[ToolDefinition],
     freeform: bool,
 ) -> Vec<Value> {
     let mut input = Vec::new();
@@ -326,7 +326,7 @@ fn response_events(
 fn response_events_with_tools(
     event: Value,
     provider_id: ProviderId,
-    tools: &[crate::core::models::ToolDefinition],
+    tools: &[ToolDefinition],
     output_items: &mut BTreeMap<u32, Value>,
     saw_tool_call: &mut bool,
 ) -> Result<Vec<ProviderEvent>> {
@@ -470,7 +470,7 @@ fn response_events_with_tools(
 fn output_item_part(
     provider_id: ProviderId,
     item: Value,
-    tools: &[crate::core::models::ToolDefinition],
+    tools: &[ToolDefinition],
 ) -> Result<MessagePart> {
     Ok(match item.get("type").and_then(Value::as_str) {
         Some("message") => {
@@ -708,7 +708,12 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::Result;
     use crate::core::models::{ToolDefinition, ToolInputDefinition, ToolOutput};
+    use crate::plugins::{
+        tool_fs_write::parse_fs_write_freeform, tool_patch_apply_patch::parse_apply_patch_freeform,
+        tool_patch_hashline::parse_patch_hashline_freeform, tool_shell::parse_shell_freeform,
+    };
     use tokio_util::sync::CancellationToken;
 
     #[test]
@@ -792,7 +797,7 @@ mod tests {
                 name: "shell".into(),
                 description: "run a command".into(),
                 input: ToolInputDefinition::new(serde_json::json!({ "type": "object" }))
-                    .with_freeform_parser(crate::plugins::tool_shell::parse_shell_freeform),
+                    .with_freeform_parser(parse_shell_freeform),
             },
             ToolDefinition {
                 name: "fs_write".into(),
@@ -801,23 +806,19 @@ mod tests {
                     "type": "object",
                     "properties": { "path": { "type": "string" } }
                 }))
-                .with_freeform_parser(crate::plugins::tool_fs_write::parse_fs_write_freeform),
+                .with_freeform_parser(parse_fs_write_freeform),
             },
             ToolDefinition {
                 name: "apply_patch".into(),
                 description: "apply a patch".into(),
                 input: ToolInputDefinition::new(serde_json::json!({ "type": "object" }))
-                    .with_freeform_parser(
-                        crate::plugins::tool_patch_apply_patch::parse_apply_patch_freeform,
-                    ),
+                    .with_freeform_parser(parse_apply_patch_freeform),
             },
             ToolDefinition {
                 name: "patch_hashline".into(),
                 description: "apply a hashline patch".into(),
                 input: ToolInputDefinition::new(serde_json::json!({ "type": "object" }))
-                    .with_freeform_parser(
-                        crate::plugins::tool_patch_hashline::parse_patch_hashline_freeform,
-                    ),
+                    .with_freeform_parser(parse_patch_hashline_freeform),
             },
             ToolDefinition {
                 name: "patch".into(),
@@ -851,7 +852,7 @@ mod tests {
             name: "shell".into(),
             description: "run a command".into(),
             input: ToolInputDefinition::new(serde_json::json!({ "type": "object" }))
-                .with_freeform_parser(crate::plugins::tool_shell::parse_shell_freeform),
+                .with_freeform_parser(parse_shell_freeform),
         };
         let message = Message {
             content: vec![MessagePart::tool_call(
@@ -869,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn response_output_items_preserve_native_data_and_call_ids() -> crate::Result<()> {
+    fn response_output_items_preserve_native_data_and_call_ids() -> Result<()> {
         let provider_id = ProviderId::new();
         let reasoning_item = serde_json::json!({
             "type": "reasoning",
@@ -932,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_tool_streaming_events_accumulate_raw_input() -> crate::Result<()> {
+    fn custom_tool_streaming_events_accumulate_raw_input() -> Result<()> {
         let provider_id = ProviderId::new();
         let mut output_items = BTreeMap::new();
         let mut saw_tool_call = false;
@@ -1016,13 +1017,13 @@ mod tests {
     }
 
     #[test]
-    fn custom_tool_calls_store_parsed_canonical_arguments() -> crate::Result<()> {
+    fn custom_tool_calls_store_parsed_canonical_arguments() -> Result<()> {
         let provider_id = ProviderId::new();
         let shell = ToolDefinition {
             name: "shell".into(),
             description: "run a command".into(),
             input: ToolInputDefinition::new(serde_json::json!({ "type": "object" }))
-                .with_freeform_parser(crate::plugins::tool_shell::parse_shell_freeform),
+                .with_freeform_parser(parse_shell_freeform),
         };
         let mut output_items = BTreeMap::new();
         let mut saw_tool_call = false;
@@ -1058,7 +1059,7 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_only_and_unknown_items_become_provider_only_parts() -> crate::Result<()> {
+    fn encrypted_only_and_unknown_items_become_provider_only_parts() -> Result<()> {
         let provider_id = ProviderId::new();
         for item in [
             serde_json::json!({ "type": "reasoning", "encrypted_content": "opaque" }),

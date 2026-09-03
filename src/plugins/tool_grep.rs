@@ -13,7 +13,7 @@ use crate::core::{
     },
     registry::PluginRegistryScope,
 };
-use crate::utils::{hashline, note::add_output_note};
+use crate::utils::{hashline, note::add_output_note, schema::json_schema};
 
 #[allow(dead_code)]
 #[derive(JsonSchema)]
@@ -78,7 +78,7 @@ impl Tool for ToolGrep {
                 "Search files visible through the current workdir using a regular-expression pattern. `path` optionally limits the search scope and `glob` optionally filters filenames. Results use `path:line|content` and are size-limited."
             }
             .into(),
-            input: ToolInputDefinition::new(crate::utils::schema::json_schema::<GrepInputSchema>()),
+            input: ToolInputDefinition::new(json_schema::<GrepInputSchema>()),
         }
     }
 

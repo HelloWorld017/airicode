@@ -7,7 +7,9 @@ use std::{
 use crate::core::{
     error::{Error, Result},
     hooks::{OpenProjectContext, OpenProjectHook},
-    models::{Plugin, PluginId, ProjectId, SessionCommit, SessionId},
+    models::{
+        CommitId, Plugin, PluginId, ProjectId, SessionCommit, SessionId, SessionMutation, TimeSeq,
+    },
     registry::{PluginRegistryScope, RegistrationHandle},
 };
 use async_trait::async_trait;
@@ -23,9 +25,9 @@ pub const SESSION_LOG_SCHEMA_VERSION: u32 = 1;
 pub struct SessionLogRecord {
     pub schema_version: u32,
     pub sequence: u64,
-    pub commit_id: crate::core::models::CommitId,
-    pub created_at: crate::core::models::TimeSeq,
-    pub mutations: Vec<crate::core::models::SessionMutation>,
+    pub commit_id: CommitId,
+    pub created_at: TimeSeq,
+    pub mutations: Vec<SessionMutation>,
 }
 
 impl From<&SessionCommit> for SessionLogRecord {

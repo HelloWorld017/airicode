@@ -12,7 +12,10 @@ use crate::core::{
     },
     registry::PluginRegistryScope,
 };
-use crate::{core::models::NoteContent, utils::note::add_tool_note};
+use crate::{
+    core::models::NoteContent,
+    utils::{note::add_tool_note, schema::json_schema},
+};
 
 #[allow(dead_code)]
 #[derive(JsonSchema)]
@@ -44,7 +47,7 @@ impl Tool for ToolQuestion {
         ToolDefinition {
             name: "question".into(),
             description: "Ask the user for information that the agent cannot safely infer. Provide the question and optional string choices.".into(),
-            input: ToolInputDefinition::new(crate::utils::schema::json_schema::<QuestionInputSchema>()),
+            input: ToolInputDefinition::new(json_schema::<QuestionInputSchema>()),
         }
     }
 

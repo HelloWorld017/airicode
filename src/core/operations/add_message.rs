@@ -1,17 +1,14 @@
 use crate::core::error::Result;
 use crate::core::models::{
     ContextPart, ContextPartId, ContextPriority, ContextSource, Message, MessageId, Role,
-    SessionMutation,
+    SessionCommit, SessionMutation,
 };
 use crate::utils::TimeSeq;
 
 use super::Operations;
 
 impl Operations {
-    pub async fn add_message(
-        &self,
-        mut message: Message,
-    ) -> Result<crate::core::models::SessionCommit> {
+    pub async fn add_message(&self, mut message: Message) -> Result<SessionCommit> {
         add_mode_metadata(&mut message);
         self.commit(vec![SessionMutation::MessageAdded { message }])
             .await

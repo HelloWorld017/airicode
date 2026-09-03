@@ -17,10 +17,10 @@ use ratatui::{
 };
 
 use crate::core::{
+    Error, Registry, Result, SessionHandle,
     models::{ModelRef, ProjectId, ProviderId, RuntimeEvent, SessionGroupId},
     runtime::{TurnEngine, TurnRequest},
     workdir::Workdir,
-    Error, Result, SessionHandle,
 };
 
 use super::{
@@ -61,7 +61,7 @@ pub struct TerminalApp {
 impl TerminalApp {
     pub fn new(
         session: SessionHandle,
-        registry: crate::core::Registry,
+        registry: Registry,
         workdir: Arc<dyn Workdir>,
         project_id: ProjectId,
         group_id: SessionGroupId,

@@ -13,7 +13,7 @@ use crate::core::{
     },
     registry::PluginRegistryScope,
 };
-use crate::utils::note::add_output_note;
+use crate::utils::{note::add_output_note, schema::json_schema};
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -69,7 +69,7 @@ impl Tool for ToolFindFile {
         ToolDefinition {
             name: "find_file".into(),
             description: "Find files using exactly one query: a case-insensitive basename keyword, an exact basename, or a filesystem-relative glob pattern. `path` optionally limits the search root and `max_results` limits output.".into(),
-            input: ToolInputDefinition::new(crate::utils::schema::json_schema::<FindFileInputSchema>()),
+            input: ToolInputDefinition::new(json_schema::<FindFileInputSchema>()),
         }
     }
 

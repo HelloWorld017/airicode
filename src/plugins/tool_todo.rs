@@ -13,7 +13,10 @@ use crate::core::{
     },
     registry::PluginRegistryScope,
 };
-use crate::{core::models::NoteContent, utils::note::add_tool_note};
+use crate::{
+    core::models::NoteContent,
+    utils::{note::add_tool_note, schema::json_schema},
+};
 
 #[allow(dead_code)]
 #[derive(JsonSchema)]
@@ -59,7 +62,7 @@ impl Tool for ToolTodo {
         ToolDefinition {
             name: "todo".into(),
             description: "Replace the durable session todo list with the complete array supplied in `todos`; send the full desired state rather than a delta. Each item needs `content` and may use `pending`, `in_progress`, `completed`, or `cancelled` status plus a priority. The updated list is stored in the todo plugin namespace and a short count is returned.".into(),
-            input: ToolInputDefinition::new(crate::utils::schema::json_schema::<TodoInputSchema>()),
+            input: ToolInputDefinition::new(json_schema::<TodoInputSchema>()),
         }
     }
 

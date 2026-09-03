@@ -181,9 +181,10 @@ impl Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Result;
 
     #[test]
-    fn message_parts_round_trip_all_content_variants() -> crate::Result<()> {
+    fn message_parts_round_trip_all_content_variants() -> Result<()> {
         let parts = vec![
             MessagePart::text("text"),
             MessagePart::reasoning("reasoning"),
@@ -208,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_only_parts_preserve_opaque_data() -> crate::Result<()> {
+    fn provider_only_parts_preserve_opaque_data() -> Result<()> {
         let provider_id = ProviderId::new();
         let part = MessagePart::provider_only(
             provider_id,
@@ -229,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_enum_parts_are_still_deserializable() -> crate::Result<()> {
+    fn legacy_enum_parts_are_still_deserializable() -> Result<()> {
         let part: MessagePart = serde_json::from_value(serde_json::json!({
             "Text": { "text": "legacy" }
         }))?;
