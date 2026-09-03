@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use airicode::{
-    core::workdir::{NativeWorkdir, Workdir, WorkdirEntryKind},
-    utils::{path_correction, PathCorrectionKind},
     Result,
+    core::workdir::{NativeWorkdir, Workdir, WorkdirEntryKind},
+    utils::{PathCorrectionKind, path_correction},
 };
 use tempfile::tempdir;
 
@@ -106,12 +106,14 @@ async fn path_correction_returns_none_below_minimum_score() -> Result<()> {
     std::fs::write(directory.path().join("readme.md"), "readme")?;
     let workdir = NativeWorkdir::new(directory.path())?;
 
-    assert!(path_correction(
-        Path::new("completely-unrelated-name"),
-        &workdir,
-        PathCorrectionKind::File,
-    )
-    .await?
-    .is_none());
+    assert!(
+        path_correction(
+            Path::new("completely-unrelated-name"),
+            &workdir,
+            PathCorrectionKind::File,
+        )
+        .await?
+        .is_none()
+    );
     Ok(())
 }

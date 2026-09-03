@@ -1,4 +1,4 @@
-use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -240,10 +240,12 @@ mod tests {
 
     #[test]
     fn empty_parts_are_rejected() {
-        assert!(serde_json::from_value::<MessagePart>(serde_json::json!({
-            "content": null,
-            "provider_data": null
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<MessagePart>(serde_json::json!({
+                "content": null,
+                "provider_data": null
+            }))
+            .is_err()
+        );
     }
 }

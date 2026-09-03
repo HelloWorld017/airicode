@@ -12,10 +12,7 @@ use airicode::{
         persistence::SessionStore,
         workdir::{NativeWorkdir, Workdir},
     },
-    plugins::{
-        JsonlSessionStore, ToolDelete, ToolPatch, ToolPatchApplyPatch, ToolWrite,
-        ToolPatchHashline,
-    },
+    plugins::{JsonlSessionStore, ToolPatch, ToolPatchApplyPatch, ToolPatchHashline, ToolWrite},
     utils::hashline,
 };
 use serde_json::json;
@@ -249,7 +246,7 @@ async fn hashline_patch_json_and_freeform_inputs_share_the_executor() -> Result<
 }
 
 #[tokio::test]
-async fn filesystem_tools_own_file_lifecycle_and_apply_patch_edits_existing_files() -> Result<()> {
+async fn apply_patch_supports_file_lifecycle_operations() -> Result<()> {
     let directory = tempdir()?;
     let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
     let ctx = context(&directory, workdir.clone());
@@ -259,23 +256,18 @@ async fn filesystem_tools_own_file_lifecycle_and_apply_patch_edits_existing_file
             ctx.clone(),
         )
         .await?;
+    workdir
+        .write(Path::new("obsolete.txt"), b"obsolete\n")
+        .await?;
     ToolPatchApplyPatch::new()
         .execute(
-            json!({ "patch": "*** Begin Patch\n*** Update File: main.txt\n@@\n-before\n+after\n*** End Patch" }),
+            json!({ "patch": "*** Begin Patch\n*** Add File: new.txt\n+new\n*** Update File: main.txt\n*** Move to: moved.txt\n@@\n-before\n+after\n*** Delete File: obsolete.txt\n*** End Patch" }),
             ctx.clone(),
         )
         .await?;
-    assert_eq!(workdir.read(Path::new("main.txt")).await?, b"after\n");
-    let output = ToolPatchApplyPatch::new()
-        .execute(
-            json!({ "patch": "*** Begin Patch\n*** Add File: new.txt\n+x\n*** End Patch" }),
-            ctx.clone(),
-        )
-        .await?;
-    assert!(matches!(output, ToolOutput::Failure { content } if content.contains("write")));
-    ToolDelete::new()
-        .execute(json!({ "path": "main.txt" }), ctx)
-        .await?;
+    assert_eq!(workdir.read(Path::new("new.txt")).await?, b"new\n");
+    assert_eq!(workdir.read(Path::new("moved.txt")).await?, b"after\n");
     assert!(!workdir.exists(Path::new("main.txt")).await?);
+    assert!(!workdir.exists(Path::new("obsolete.txt")).await?);
     Ok(())
 }

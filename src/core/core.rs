@@ -3,11 +3,11 @@ use std::{path::PathBuf, sync::Arc};
 use serde_json::Value;
 
 use super::{
-    config::{aggregate, Config},
+    config::{Config, aggregate},
     error::Result,
     hooks::{ConfigReadContext, OpenProjectContext},
     models::{Plugin, Project, ProjectId, SessionGroupId, SessionId, SessionState},
-    operations::{new_session, new_session_with_store, SessionHandle},
+    operations::{SessionHandle, new_session, new_session_with_store},
     registry::Registry,
     shell::ShellActionHandler,
 };

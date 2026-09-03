@@ -84,9 +84,9 @@ impl Tool for ToolWrite {
 }
 
 pub fn parse_write_freeform(input: &str) -> Result<Value> {
-    let (header, body) = input.split_once('\n').ok_or_else(|| {
-        Error::Tool("write freeform input requires a header and content".into())
-    })?;
+    let (header, body) = input
+        .split_once('\n')
+        .ok_or_else(|| Error::Tool("write freeform input requires a header and content".into()))?;
     let header = header.strip_suffix('\r').unwrap_or(header);
     let specification = header
         .strip_prefix("WRITE ")

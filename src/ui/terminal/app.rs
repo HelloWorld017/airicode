@@ -6,14 +6,14 @@ use crossterm::{
         MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Color, Style},
     widgets::{Block, Borders, Paragraph},
-    Terminal,
 };
 
 use crate::core::{
@@ -27,8 +27,8 @@ use super::{
     editbar::EditBarState,
     editor::EditorState,
     messages::{
-        build_transcript, render_transcript, transcript_height, HitAction, HitRegion,
-        TranscriptItem, TranscriptItemId,
+        HitAction, HitRegion, TranscriptItem, TranscriptItemId, build_transcript,
+        render_transcript, transcript_height,
     },
     statusbar::StatusBarState,
     theme,
@@ -178,7 +178,7 @@ impl TerminalApp {
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(true),
             (KeyCode::Char('q'), KeyModifiers::NONE) if self.editor.text.is_empty() => {
-                return Ok(true)
+                return Ok(true);
             }
             (KeyCode::Enter, _) => {
                 let input = self.editor.take();

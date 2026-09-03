@@ -7,8 +7,8 @@ use crate::core::{
     error::Result,
     hooks::{ContextContributionContext, ContextContributionHook},
     models::{
-        ContextContribution, ContextContributionPosition, ContextPriority, Plugin, PluginId,
-        DEFAULT_MODE,
+        ContextContribution, ContextContributionPosition, ContextPriority, DEFAULT_MODE, Plugin,
+        PluginId,
     },
     registry::PluginRegistryScope,
 };

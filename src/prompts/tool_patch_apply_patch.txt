@@ -1,6 +1,8 @@
-Apply a standard GPT-style patch to existing UTF-8 files.
+Apply a standard GPT-style patch to UTF-8 files.
 
-Use `*** Begin Patch`, one or more `*** Update File: path` sections with `@@`
-hunks, and `*** End Patch`. Hunk lines begin with a space for context, `-` for
-removed content, or `+` for added content. Use `write`, `delete`, and `rename`
-instead of `*** Add File`, `*** Delete File`, or move operations.
+Use `*** Begin Patch` and `*** End Patch` around one or more operations. Use
+`*** Add File: path` followed by `+` content lines to create a file, `*** Delete
+File: path` to delete one, or `*** Update File: path` with `@@` hunks to edit
+one. An update may include `*** Move to: new-path` before its hunks to rename
+or move the edited file. Hunk lines begin with a space for context, `-` for
+removed content, or `+` for added content.

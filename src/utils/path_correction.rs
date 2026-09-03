@@ -3,9 +3,9 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use crate::Result;
 use crate::core::models::WorkdirEntryKind;
 use crate::core::workdir::Workdir;
-use crate::Result;
 
 const MIN_SCORE: f64 = 0.55;
 const LEAF_WEIGHT: f64 = 0.7;

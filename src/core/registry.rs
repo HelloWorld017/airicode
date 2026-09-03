@@ -325,9 +325,7 @@ impl Registry {
             .collect()
     }
 
-    pub fn open_project_hooks(
-        &self,
-    ) -> Vec<(Arc<dyn OpenProjectHook>, PluginRegistryScope)> {
+    pub fn open_project_hooks(&self) -> Vec<(Arc<dyn OpenProjectHook>, PluginRegistryScope)> {
         self.inner
             .hooks
             .read()

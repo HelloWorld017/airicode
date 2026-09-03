@@ -3,10 +3,10 @@ use std::{path::PathBuf, sync::Arc};
 use airicode::{
     core::{CoreBuilder, SessionGroupId, project_from_path},
     plugins::{
-        InstructionBasePlugin, OpenAiProviderPlugin, PersistencePlugin, ToolFindFilePlugin,
-        ToolDeletePlugin, ToolRenamePlugin, ToolWritePlugin, ToolGrepPlugin,
-        ToolPatchApplyPatchPlugin, ToolPatchHashlinePlugin, ToolPatchPlugin, ToolQuestionPlugin,
-        ToolReadPlugin, ToolShellPlugin, ToolTodoPlugin, ToolWebfetchPlugin,
+        InstructionBasePlugin, OpenAiProviderPlugin, PersistencePlugin, ToolDeletePlugin,
+        ToolFindFilePlugin, ToolGrepPlugin, ToolPatchApplyPatchPlugin, ToolPatchHashlinePlugin,
+        ToolPatchPlugin, ToolQuestionPlugin, ToolReadPlugin, ToolRenamePlugin, ToolShellPlugin,
+        ToolTodoPlugin, ToolWebfetchPlugin, ToolWritePlugin,
     },
     ui::terminal::TerminalApp,
 };

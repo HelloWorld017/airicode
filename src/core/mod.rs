@@ -12,7 +12,7 @@ pub mod session;
 pub mod shell;
 pub mod workdir;
 
-pub use core::{project_from_path, Core, CoreBuilder};
+pub use core::{Core, CoreBuilder, project_from_path};
 pub use error::{Error, Result};
 pub use hooks::{
     AfterToolExecutionHook, BeforeMessageHook, BeforeProviderRequestHook, BeforeToolExecutionHook,

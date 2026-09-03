@@ -90,48 +90,113 @@ impl ToolPatchApplyPatch {
             .get("patch")
             .and_then(Value::as_str)
             .ok_or_else(|| Error::Tool("apply_patch requires patch".into()))?;
-        let updates = parse_apply_patch(patch).map_err(Error::Tool)?;
-        let mut planned = BTreeMap::new();
-        for (path, hunks) in updates {
+        let operations = parse_apply_patch(patch).map_err(Error::Tool)?;
+        let mut files = BTreeMap::new();
+        let mut added = 0;
+        let mut updated = 0;
+        let mut deleted = 0;
+        let mut moved = 0;
+        for operation in operations {
             if context.cancellation.is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            let bytes = context.workdir.read(Path::new(&path)).await?;
-            if bytes.contains(&0) {
-                return Err(Error::Tool(format!(
-                    "cannot patch binary/NUL-containing input: {path}"
-                )));
+            match operation {
+                PatchOperation::Add { path, content } => {
+                    load_file(context, &mut files, &path, self.max_bytes).await?;
+                    let state = files.get_mut(&path).expect("loaded file state");
+                    if state.content.is_some() {
+                        return Err(Error::Tool(format!("cannot add existing file: {path}")));
+                    }
+                    if content.len() > self.max_bytes {
+                        return Err(Error::Tool(format!(
+                            "added file exceeds patch limit of {} bytes: {path}",
+                            self.max_bytes
+                        )));
+                    }
+                    state.content = Some(content);
+                    added += 1;
+                }
+                PatchOperation::Update {
+                    path,
+                    move_to,
+                    hunks,
+                } => {
+                    load_file(context, &mut files, &path, self.max_bytes).await?;
+                    let mut content = files
+                        .get(&path)
+                        .and_then(|state| state.content.clone())
+                        .ok_or_else(|| {
+                            Error::Tool(format!("cannot update missing file: {path}"))
+                        })?;
+                    for hunk in hunks {
+                        content = apply_hunk(&content, &hunk)
+                            .map_err(|error| Error::Tool(format!("{path}: {error}")))?;
+                    }
+                    if content.len() > self.max_bytes {
+                        return Err(Error::Tool(format!(
+                            "patched file exceeds limit of {} bytes: {path}",
+                            self.max_bytes
+                        )));
+                    }
+                    if let Some(move_to) = move_to {
+                        if path == move_to {
+                            return Err(Error::Tool(format!(
+                                "cannot move a file onto itself: {path}"
+                            )));
+                        }
+                        load_file(context, &mut files, &move_to, self.max_bytes).await?;
+                        if files
+                            .get(&move_to)
+                            .is_some_and(|state| state.content.is_some())
+                        {
+                            return Err(Error::Tool(format!(
+                                "cannot move {path} onto existing file: {move_to}"
+                            )));
+                        }
+                        files.get_mut(&path).expect("loaded file state").content = None;
+                        files.get_mut(&move_to).expect("loaded file state").content = Some(content);
+                        moved += 1;
+                    } else {
+                        files.get_mut(&path).expect("loaded file state").content = Some(content);
+                    }
+                    updated += 1;
+                }
+                PatchOperation::Delete { path } => {
+                    load_file(context, &mut files, &path, self.max_bytes).await?;
+                    let state = files.get_mut(&path).expect("loaded file state");
+                    if state.content.is_none() {
+                        return Err(Error::Tool(format!("cannot delete missing file: {path}")));
+                    }
+                    state.content = None;
+                    deleted += 1;
+                }
             }
-            if bytes.len() > self.max_bytes {
-                return Err(Error::Tool(format!(
-                    "file exceeds patch limit of {} bytes: {path}",
-                    self.max_bytes
-                )));
-            }
-            let mut content = String::from_utf8(bytes)
-                .map_err(|_| Error::Tool(format!("cannot patch non-UTF-8 input: {path}")))?;
-            for hunk in hunks {
-                content = apply_hunk(&content, &hunk)
-                    .map_err(|error| Error::Tool(format!("{path}: {error}")))?;
-            }
-            if content.len() > self.max_bytes {
-                return Err(Error::Tool(format!(
-                    "patched file exceeds limit of {} bytes: {path}",
-                    self.max_bytes
-                )));
-            }
-            planned.insert(path, content);
         }
-        for (path, content) in &planned {
+        for (path, state) in &files {
             if context.cancellation.is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            context
-                .workdir
-                .write(Path::new(path), content.as_bytes())
-                .await?;
+            if state.original == state.content {
+                continue;
+            }
+            if let Some(content) = &state.content {
+                context
+                    .workdir
+                    .write(Path::new(path), content.as_bytes())
+                    .await?;
+            }
         }
-        Ok(format!("Applied patch to {} file(s)", planned.len()))
+        for (path, state) in &files {
+            if context.cancellation.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            if state.original != state.content && state.content.is_none() {
+                context.workdir.remove(Path::new(path)).await?;
+            }
+        }
+        Ok(format!(
+            "Applied patch: {added} added, {updated} updated, {deleted} deleted, {moved} moved"
+        ))
     }
 }
 
@@ -145,82 +210,182 @@ struct Hunk {
     after: String,
 }
 
-fn parse_apply_patch(input: &str) -> std::result::Result<BTreeMap<String, Vec<Hunk>>, String> {
+enum PatchOperation {
+    Add {
+        path: String,
+        content: String,
+    },
+    Update {
+        path: String,
+        move_to: Option<String>,
+        hunks: Vec<Hunk>,
+    },
+    Delete {
+        path: String,
+    },
+}
+
+struct FileState {
+    original: Option<String>,
+    content: Option<String>,
+}
+
+async fn load_file(
+    context: &ToolContext,
+    files: &mut BTreeMap<String, FileState>,
+    path: &str,
+    max_bytes: usize,
+) -> Result<()> {
+    if files.contains_key(path) {
+        return Ok(());
+    }
+    if context.cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    let content = if context.workdir.exists(Path::new(path)).await? {
+        let bytes = context.workdir.read(Path::new(path)).await?;
+        if bytes.contains(&0) {
+            return Err(Error::Tool(format!(
+                "cannot patch binary/NUL-containing input: {path}"
+            )));
+        }
+        if bytes.len() > max_bytes {
+            return Err(Error::Tool(format!(
+                "file exceeds patch limit of {max_bytes} bytes: {path}"
+            )));
+        }
+        Some(
+            String::from_utf8(bytes)
+                .map_err(|_| Error::Tool(format!("cannot patch non-UTF-8 input: {path}")))?,
+        )
+    } else {
+        None
+    };
+    files.insert(
+        path.to_string(),
+        FileState {
+            original: content.clone(),
+            content,
+        },
+    );
+    Ok(())
+}
+
+fn parse_apply_patch(input: &str) -> std::result::Result<Vec<PatchOperation>, String> {
     let lines = input.lines().collect::<Vec<_>>();
     if lines.first().copied() != Some("*** Begin Patch")
         || lines.last().copied() != Some("*** End Patch")
     {
         return Err("patch must start with `*** Begin Patch` and end with `*** End Patch`".into());
     }
-    let mut updates = BTreeMap::<String, Vec<Hunk>>::new();
+    let mut operations = Vec::new();
     let mut index = 1;
     while index + 1 < lines.len() {
         let header = lines[index];
-        if header.starts_with("*** Add File:")
-            || header.starts_with("*** Delete File:")
-            || header.starts_with("*** Move to:")
-        {
-            return Err("apply_patch only edits existing files; use write, delete, or rename for file lifecycle operations".into());
-        }
-        let path = header
-            .strip_prefix("*** Update File: ")
-            .filter(|path| !path.trim().is_empty())
-            .ok_or_else(|| format!("expected `*** Update File: path`, found `{header}`"))?
-            .trim()
-            .to_string();
-        index += 1;
-        let mut hunks = Vec::new();
-        while index + 1 < lines.len() && !lines[index].starts_with("*** ") {
-            if !lines[index].starts_with("@@") {
-                return Err(format!(
-                    "expected hunk header starting with `@@`, found `{}`",
-                    lines[index]
-                ));
-            }
+        if let Some(path) = patch_path(header, "Add File") {
             index += 1;
-            let mut before = String::new();
-            let mut after = String::new();
-            while index + 1 < lines.len()
-                && !lines[index].starts_with("@@")
-                && !lines[index].starts_with("*** ")
-            {
+            let mut content = String::new();
+            while index + 1 < lines.len() && !lines[index].starts_with("*** ") {
                 let line = lines[index];
-                let (prefix, content) = line
-                    .split_at_checked(1)
-                    .ok_or_else(|| "empty patch line".to_string())?;
-                match prefix {
-                    " " => {
-                        before.push_str(content);
-                        before.push('\n');
-                        after.push_str(content);
-                        after.push('\n');
-                    }
-                    "-" => {
-                        before.push_str(content);
-                        before.push('\n');
-                    }
-                    "+" => {
-                        after.push_str(content);
-                        after.push('\n');
-                    }
-                    _ => return Err(format!("invalid hunk line `{line}`")),
-                }
+                let line_content = line
+                    .strip_prefix('+')
+                    .ok_or_else(|| format!("Add File {path} contains non-added line `{line}`"))?;
+                content.push_str(line_content);
+                content.push('\n');
                 index += 1;
             }
-            if before == after {
-                return Err("hunk does not change the file".into());
-            }
-            hunks.push(Hunk { before, after });
+            operations.push(PatchOperation::Add { path, content });
+            continue;
         }
+        if let Some(path) = patch_path(header, "Delete File") {
+            index += 1;
+            if index + 1 < lines.len() && !lines[index].starts_with("*** ") {
+                return Err(format!("Delete File {path} must not contain file content"));
+            }
+            operations.push(PatchOperation::Delete { path });
+            continue;
+        }
+        let path = patch_path(header, "Update File")
+            .ok_or_else(|| format!("expected patch operation header, found `{header}`"))?;
+        index += 1;
+        let move_to = if index + 1 < lines.len() {
+            if let Some(path) = patch_path(lines[index], "Move to") {
+                index += 1;
+                Some(path)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let hunks = parse_hunks(&lines, &mut index)?;
         if hunks.is_empty() {
             return Err(format!("Update File {path} has no hunks"));
         }
-        updates.entry(path).or_default().extend(hunks);
+        operations.push(PatchOperation::Update {
+            path,
+            move_to,
+            hunks,
+        });
     }
-    if updates.is_empty() {
-        return Err("patch requires at least one Update File operation".into());
+    if operations.is_empty() {
+        return Err("patch requires at least one operation".into());
     }
-    Ok(updates)
+    Ok(operations)
+}
+
+fn patch_path(header: &str, operation: &str) -> Option<String> {
+    header
+        .strip_prefix(&format!("*** {operation}: "))
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| path.trim().to_string())
+}
+
+fn parse_hunks(lines: &[&str], index: &mut usize) -> std::result::Result<Vec<Hunk>, String> {
+    let mut hunks = Vec::new();
+    while *index + 1 < lines.len() && !lines[*index].starts_with("*** ") {
+        if !lines[*index].starts_with("@@") {
+            return Err(format!(
+                "expected hunk header starting with `@@`, found `{}`",
+                lines[*index]
+            ));
+        }
+        *index += 1;
+        let mut before = String::new();
+        let mut after = String::new();
+        while *index + 1 < lines.len()
+            && !lines[*index].starts_with("@@")
+            && !lines[*index].starts_with("*** ")
+        {
+            let line = lines[*index];
+            let (prefix, content) = line
+                .split_at_checked(1)
+                .ok_or_else(|| "empty patch line".to_string())?;
+            match prefix {
+                " " => {
+                    before.push_str(content);
+                    before.push('\n');
+                    after.push_str(content);
+                    after.push('\n');
+                }
+                "-" => {
+                    before.push_str(content);
+                    before.push('\n');
+                }
+                "+" => {
+                    after.push_str(content);
+                    after.push('\n');
+                }
+                _ => return Err(format!("invalid hunk line `{line}`")),
+            }
+            *index += 1;
+        }
+        if before == after {
+            return Err("hunk does not change the file".into());
+        }
+        hunks.push(Hunk { before, after });
+    }
+    Ok(hunks)
 }
 
 fn apply_hunk(source: &str, hunk: &Hunk) -> std::result::Result<String, String> {
@@ -279,9 +444,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parser_rejects_file_lifecycle_operations() {
-        let error =
-            parse_apply_patch("*** Begin Patch\n*** Add File: x\n+x\n*** End Patch").unwrap_err();
-        assert!(error.contains("write"));
+    fn parser_supports_file_lifecycle_operations() {
+        assert!(parse_apply_patch(
+            "*** Begin Patch\n*** Add File: new.txt\n+new\n*** Update File: old.txt\n*** Move to: moved.txt\n@@\n-old\n+new\n*** Delete File: deleted.txt\n*** End Patch"
+        )
+        .is_ok());
     }
 }

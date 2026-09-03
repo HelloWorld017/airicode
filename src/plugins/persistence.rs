@@ -160,7 +160,7 @@ impl JsonlSessionStore {
                     return Err(Error::Persistence(format!(
                         "corrupt session log line {}: {error}",
                         index + 1
-                    )))
+                    )));
                 }
             };
             commits.push(SessionCommit::try_from(record)?);

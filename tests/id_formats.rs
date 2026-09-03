@@ -1,9 +1,9 @@
 use std::str::FromStr;
 
 use airicode::{
-    core::{project_from_path, ProjectId, SessionGroupId, SessionId},
-    plugins::JsonlSessionStore,
     Result,
+    core::{ProjectId, SessionGroupId, SessionId, project_from_path},
+    plugins::JsonlSessionStore,
 };
 use tempfile::tempdir;
 
@@ -16,12 +16,16 @@ fn session_ids_use_embedded_url_safe_base64_group_identity() -> Result<()> {
 
     assert_eq!(group_text.len(), 16);
     assert_eq!(session_text.len(), 24);
-    assert!(group_text
-        .chars()
-        .all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_'));
-    assert!(session_text
-        .chars()
-        .all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_'));
+    assert!(
+        group_text
+            .chars()
+            .all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_')
+    );
+    assert!(
+        session_text
+            .chars()
+            .all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_')
+    );
     assert_eq!(SessionGroupId::from_str(&group_text).unwrap(), group_id);
     assert_eq!(SessionId::from_str(&session_text).unwrap(), session_id);
     assert_eq!(session_id.group_id(), group_id);
