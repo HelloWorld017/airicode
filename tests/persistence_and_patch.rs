@@ -13,7 +13,7 @@ use airicode::{
         workdir::{NativeWorkdir, Workdir},
     },
     plugins::{
-        JsonlSessionStore, ToolFsDelete, ToolFsWrite, ToolPatch, ToolPatchApplyPatch,
+        JsonlSessionStore, ToolDelete, ToolPatch, ToolPatchApplyPatch, ToolWrite,
         ToolPatchHashline,
     },
     utils::hashline,
@@ -253,7 +253,7 @@ async fn filesystem_tools_own_file_lifecycle_and_apply_patch_edits_existing_file
     let directory = tempdir()?;
     let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
     let ctx = context(&directory, workdir.clone());
-    ToolFsWrite::new()
+    ToolWrite::new()
         .execute(
             json!({ "path": "main.txt", "content": "before\n" }),
             ctx.clone(),
@@ -272,8 +272,8 @@ async fn filesystem_tools_own_file_lifecycle_and_apply_patch_edits_existing_file
             ctx.clone(),
         )
         .await?;
-    assert!(matches!(output, ToolOutput::Failure { content } if content.contains("fs_write")));
-    ToolFsDelete::new()
+    assert!(matches!(output, ToolOutput::Failure { content } if content.contains("write")));
+    ToolDelete::new()
         .execute(json!({ "path": "main.txt" }), ctx)
         .await?;
     assert!(!workdir.exists(Path::new("main.txt")).await?);

@@ -4,4 +4,4 @@ Apply exact replacements to one existing UTF-8 file. The input is JSON:
 
 Every `oldText` must occur exactly once in the original snapshot. Replacements
 must not overlap, and all edits are validated before the file is written. Use
-`fs_write`, `fs_delete`, and `fs_rename` for file lifecycle operations.
+`write`, `delete`, and `rename` for file lifecycle operations.

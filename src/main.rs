@@ -4,7 +4,7 @@ use airicode::{
     core::{CoreBuilder, SessionGroupId, project_from_path},
     plugins::{
         InstructionBasePlugin, OpenAiProviderPlugin, PersistencePlugin, ToolFindFilePlugin,
-        ToolFsDeletePlugin, ToolFsRenamePlugin, ToolFsWritePlugin, ToolGrepPlugin,
+        ToolDeletePlugin, ToolRenamePlugin, ToolWritePlugin, ToolGrepPlugin,
         ToolPatchApplyPatchPlugin, ToolPatchHashlinePlugin, ToolPatchPlugin, ToolQuestionPlugin,
         ToolReadPlugin, ToolShellPlugin, ToolTodoPlugin, ToolWebfetchPlugin,
     },
@@ -31,9 +31,9 @@ async fn main() -> airicode::Result<()> {
         .plugin(Arc::new(ToolPatchPlugin::new()))
         .plugin(Arc::new(ToolPatchHashlinePlugin::new()))
         .plugin(Arc::new(ToolPatchApplyPatchPlugin::new()))
-        .plugin(Arc::new(ToolFsWritePlugin::new()))
-        .plugin(Arc::new(ToolFsRenamePlugin::new()))
-        .plugin(Arc::new(ToolFsDeletePlugin::new()))
+        .plugin(Arc::new(ToolWritePlugin::new()))
+        .plugin(Arc::new(ToolRenamePlugin::new()))
+        .plugin(Arc::new(ToolDeletePlugin::new()))
         .plugin(Arc::new(ToolGrepPlugin::new()))
         .plugin(Arc::new(ToolFindFilePlugin::new()))
         .plugin(Arc::new(ToolTodoPlugin::new()))

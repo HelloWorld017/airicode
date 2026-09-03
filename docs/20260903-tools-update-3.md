@@ -1,5 +1,5 @@
 # Tool Rework
-1. tool_fs_rename.rs, tool_fs_write.rs, tool_fs_delete.rs 의 추가
+1. tool_rename.rs, tool_write.rs, tool_delete.rs 의 추가
 2. tool_patch.rs 제거 및 다양화
     * GPT용 -> apply_patch
     * 소형 모델용 -> patch
@@ -62,7 +62,7 @@ const patchSchema = Type.Object(
         ]
     }
     ```
-2. 기존 `ADD path` `DELETE path` 문법은 제거 (`fs_*` 툴 사용)
+2. 기존 `ADD path` `DELETE path` 문법은 제거 (파일 lifecycle 툴 사용)
     * 대신 `DELETE path FROM line:hash TO line:hash` 문법 추가
 
 * 활성화 조건: `tool.enable_hashline === true`
@@ -72,7 +72,7 @@ const patchSchema = Type.Object(
 
 ## Freeform 변경
 Freeform 에 해당하는 툴
-* `fs_write`
+* `write`
 * `apply_patch`
 * `patch_hashline`
 * `shell`
@@ -224,7 +224,7 @@ let ToolInput::Text(command) = input else ...
 요청하신 네 개만 parser를 제공합니다.
 
 ```text
-fs_write
+write
 apply_patch
 patch_hashline
 shell
@@ -288,12 +288,12 @@ OpenAI의 원래 `custom_tool_call` 표현은 기존처럼 `provider_data`에 �
 
 ```text
 src/plugins/
-  tool_fs_write.rs
-  tool_fs_rename.rs
-  tool_fs_delete.rs
+  tool_write.rs
+  tool_rename.rs
+  tool_delete.rs
 ```
 
-## `fs_write`
+## `write`
 
 JSON schema:
 
@@ -314,14 +314,14 @@ Freeform parser를 가집니다.
 
 ```text
 JSON provider     -> {"path":"...", "content":"..."}
-freeform provider -> textual fs_write syntax
+freeform provider -> textual write syntax
 ```
 
 가 최종적으로 동일한 JSON executor로 들어갑니다.
 
 파일 생성 및 전체 overwrite를 담당합니다.
 
-## `fs_rename`
+## `rename`
 
 JSON-only:
 
@@ -334,7 +334,7 @@ JSON-only:
 
 rename/move만 담당합니다.
 
-## `fs_delete`
+## `delete`
 
 JSON-only:
 
@@ -349,10 +349,10 @@ JSON-only:
 이 세 툴이 생기면서 patch 도구에서는 **파일 lifecycle을 완전히 제거**합니다.
 
 ```text
-create    -> fs_write
-overwrite -> fs_write
-rename    -> fs_rename
-delete    -> fs_delete
+create    -> write
+overwrite -> write
+rename    -> rename
+delete    -> delete
 edit      -> patch / patch_hashline / apply_patch
 ```
 
@@ -491,7 +491,7 @@ ADD path
 DELETE path
 ```
 
-특히 기존 patch가 실제로 `ADD path`를 포함하는 문법을 갖고 있으므로, 이 부분은 `fs_write`로 이관합니다. 현재 prompt/parser에도 `ADD path`가 들어가 있습니다. ([GitHub][5])
+특히 기존 patch가 실제로 `ADD path`를 포함하는 문법을 갖고 있으므로, 이 부분은 `write`로 이관합니다. 현재 prompt/parser에도 `ADD path`가 들어가 있습니다. ([GitHub][5])
 
 Freeform parser의 결과도 바로 operation을 실행하지 않고:
 
@@ -771,9 +771,9 @@ src/
 │  ├─ tool_grep.rs
 │  ├─ tool_shell.rs
 │  │
-│  ├─ tool_fs_write.rs
-│  ├─ tool_fs_rename.rs
-│  ├─ tool_fs_delete.rs
+│  ├─ tool_write.rs
+│  ├─ tool_rename.rs
+│  ├─ tool_delete.rs
 │  │
 │  ├─ tool_patch.rs
 │  ├─ tool_patch_hashline.rs
@@ -819,10 +819,10 @@ src/
 
 4. **FS tool 도입**
 
-   * `fs_write`
-   * `fs_rename`
-   * `fs_delete`
-   * fs_write freeform 지원
+   * `write`
+   * `rename`
+   * `delete`
+   * write freeform 지원
 
 5. **기존 patch → hashline 이동**
 
@@ -865,7 +865,7 @@ src/
 
 특히 아래 케이스는 regression test를 두는 것이 좋습니다.
 
-* `tool.freeform=false`이면 `shell`, `fs_write`, `apply_patch`, `patch_hashline` 모두 JSON function tool로 노출
+* `tool.freeform=false`이면 `shell`, `write`, `apply_patch`, `patch_hashline` 모두 JSON function tool로 노출
 * `tool.freeform=true` + OpenAI이면 네 툴만 custom tool
 * `patch`는 어떤 경우에도 function tool
 * custom `patch_hashline` 입력과 JSON `operations` 입력이 동일한 canonical JSON/결과 생성
@@ -875,7 +875,7 @@ src/
 * 중복 `oldText` 실패
 * overlapping edit 실패
 * `patch_hashline`의 `ADD` 실패
-* file create/delete는 각각 `fs_write`/`fs_delete`만 담당
+* file create/delete는 각각 `write`/`delete`만 담당
 * persisted freeform tool call도 semantic `arguments`에는 JSON이 저장됨
 
 전체적으로는 **`ToolInput`에서 Text라는 개념 자체를 제거하는 것**이 이번 리워크에서 가장 중요한 설계 포인트라고 봅니다. 그렇게 해야 freeform이 “툴 종류”가 아니라 정말로 **provider가 선택할 수 있는 transport/representation**이 되고, 이후 Anthropic/OpenRouter 같은 provider를 추가해도 툴 구현을 다시 분기할 필요가 없습니다. 현재 OpenAI provider의 `Text -> custom`, `JsonSchema -> function` 직접 매핑도 이 방향으로 가장 깔끔하게 일반화할 수 있습니다. ([GitHub][1])

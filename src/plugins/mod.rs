@@ -5,9 +5,9 @@ pub mod native_workdir {
     pub use crate::core::workdir::{NativeWorkdir, Workdir, WorkdirLayer};
 }
 pub mod tool_find_file;
-pub mod tool_fs_delete;
-pub mod tool_fs_rename;
-pub mod tool_fs_write;
+pub mod tool_delete;
+pub mod tool_rename;
+pub mod tool_write;
 pub mod tool_grep;
 pub mod tool_patch;
 pub mod tool_patch_apply_patch;
@@ -27,9 +27,9 @@ pub use provider_openai::{
     ProviderOpenAIPlugin,
 };
 pub use tool_find_file::{ToolFindFile, ToolFindFilePlugin};
-pub use tool_fs_delete::{ToolFsDelete, ToolFsDeletePlugin};
-pub use tool_fs_rename::{ToolFsRename, ToolFsRenamePlugin};
-pub use tool_fs_write::{ToolFsWrite, ToolFsWritePlugin};
+pub use tool_delete::{ToolDelete, ToolDeletePlugin};
+pub use tool_rename::{ToolRename, ToolRenamePlugin};
+pub use tool_write::{ToolWrite, ToolWritePlugin};
 pub use tool_grep::{ToolGrep, ToolGrepPlugin};
 pub use tool_patch::{ToolPatch, ToolPatchPlugin};
 pub use tool_patch_apply_patch::{ToolPatchApplyPatch, ToolPatchApplyPatchPlugin};

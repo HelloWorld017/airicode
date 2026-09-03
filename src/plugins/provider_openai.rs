@@ -711,7 +711,7 @@ mod tests {
     use crate::Result;
     use crate::core::models::{ToolDefinition, ToolInputDefinition, ToolOutput};
     use crate::plugins::{
-        tool_fs_write::parse_fs_write_freeform, tool_patch_apply_patch::parse_apply_patch_freeform,
+        tool_write::parse_write_freeform, tool_patch_apply_patch::parse_apply_patch_freeform,
         tool_patch_hashline::parse_patch_hashline_freeform, tool_shell::parse_shell_freeform,
     };
     use tokio_util::sync::CancellationToken;
@@ -800,13 +800,13 @@ mod tests {
                     .with_freeform_parser(parse_shell_freeform),
             },
             ToolDefinition {
-                name: "fs_write".into(),
+                name: "write".into(),
                 description: "write a file".into(),
                 input: ToolInputDefinition::new(serde_json::json!({
                     "type": "object",
                     "properties": { "path": { "type": "string" } }
                 }))
-                .with_freeform_parser(parse_fs_write_freeform),
+                .with_freeform_parser(parse_write_freeform),
             },
             ToolDefinition {
                 name: "apply_patch".into(),

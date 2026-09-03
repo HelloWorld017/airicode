@@ -15,85 +15,100 @@ use crate::{
     utils::note::add_output_note,
 };
 
-pub struct ToolFsDelete {
+pub struct ToolRename {
     id: ToolId,
 }
 
-impl ToolFsDelete {
+impl ToolRename {
     pub fn new() -> Self {
         Self { id: ToolId::new() }
     }
 }
 
-impl Default for ToolFsDelete {
+impl Default for ToolRename {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl Tool for ToolFsDelete {
+impl Tool for ToolRename {
     fn id(&self) -> ToolId {
         self.id
     }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "fs_delete".into(),
-            description: "Delete one file. Pass `{ \"path\": \"...\" }`.".into(),
+            name: "rename".into(),
+            description: "Rename or move one file. Pass `{ \"from\": \"...\", \"to\": \"...\" }`."
+                .into(),
             input: ToolInputDefinition::new(json!({
                 "type": "object",
-                "properties": { "path": { "type": "string" } },
-                "required": ["path"]
+                "properties": {
+                    "from": { "type": "string" },
+                    "to": { "type": "string" }
+                },
+                "required": ["from", "to"]
             })),
         }
     }
 
     async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {
-        let path = input
-            .get("path")
+        let from = input
+            .get("from")
             .and_then(Value::as_str)
             .filter(|path| !path.is_empty())
-            .ok_or_else(|| Error::Tool("fs_delete requires a non-empty path".into()))?;
+            .ok_or_else(|| Error::Tool("rename requires a non-empty from path".into()))?;
+        let to = input
+            .get("to")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| Error::Tool("rename requires a non-empty to path".into()))?;
         if context.cancellation.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        let output = match context.workdir.remove(Path::new(path)).await {
+        let output = match context.workdir.rename(Path::new(from), Path::new(to)).await {
             Ok(()) => ToolOutput::Success {
-                content: format!("Deleted {path}"),
+                content: format!("Renamed {from} to {to}"),
             },
             Err(Error::Cancelled) => return Err(Error::Cancelled),
             Err(error) => ToolOutput::Failure {
                 content: error.to_string(),
             },
         };
-        add_output_note(&context, "fs_delete", format!("Deleted {path}"), &output).await?;
+        add_output_note(
+            &context,
+            "rename",
+            format!("Renamed {from} to {to}"),
+            &output,
+        )
+        .await?;
         Ok(output)
     }
 }
 
-pub struct ToolFsDeletePlugin {
+pub struct ToolRenamePlugin {
     id: PluginId,
-    tool: Arc<ToolFsDelete>,
+    tool: Arc<ToolRename>,
 }
 
-impl ToolFsDeletePlugin {
+impl ToolRenamePlugin {
     pub fn new() -> Self {
         Self {
             id: PluginId::new(),
-            tool: Arc::new(ToolFsDelete::new()),
+            tool: Arc::new(ToolRename::new()),
         }
     }
 }
 
 #[async_trait]
-impl Plugin for ToolFsDeletePlugin {
+impl Plugin for ToolRenamePlugin {
     fn id(&self) -> PluginId {
         self.id
     }
 
     fn name(&self) -> &str {
-        "tool_fs_delete"
+        "tool_rename"
     }
 
     async fn init(self: Arc<Self>, registry: PluginRegistryScope) -> Result<()> {

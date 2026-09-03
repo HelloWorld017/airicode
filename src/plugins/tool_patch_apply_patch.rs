@@ -160,7 +160,7 @@ fn parse_apply_patch(input: &str) -> std::result::Result<BTreeMap<String, Vec<Hu
             || header.starts_with("*** Delete File:")
             || header.starts_with("*** Move to:")
         {
-            return Err("apply_patch only edits existing files; use fs_write, fs_delete, or fs_rename for file lifecycle operations".into());
+            return Err("apply_patch only edits existing files; use write, delete, or rename for file lifecycle operations".into());
         }
         let path = header
             .strip_prefix("*** Update File: ")
@@ -282,6 +282,6 @@ mod tests {
     fn parser_rejects_file_lifecycle_operations() {
         let error =
             parse_apply_patch("*** Begin Patch\n*** Add File: x\n+x\n*** End Patch").unwrap_err();
-        assert!(error.contains("fs_write"));
+        assert!(error.contains("write"));
     }
 }
