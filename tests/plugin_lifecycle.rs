@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
 use airicode::{
-    core::{project_from_path, CoreBuilder},
-    plugins::{OpenAiProviderPlugin, PersistencePlugin},
     Result,
+    core::{CoreBuilder, project_from_path},
+    plugins::{
+        OpenAiProviderPlugin, PersistencePlugin, ToolGrepPlugin, ToolPatchHashlinePlugin,
+        ToolPatchPlugin, ToolReadPlugin,
+    },
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -11,7 +14,7 @@ use tempfile::tempdir;
 #[tokio::test]
 async fn openai_provider_is_created_by_config_read() -> Result<()> {
     let environment_name = "AIRICODE_TEST_OPENAI_KEY";
-    std::env::set_var(environment_name, "test-key");
+    unsafe { std::env::set_var(environment_name, "test-key") };
     let plugin = Arc::new(OpenAiProviderPlugin::new());
     assert!(plugin.provider().is_none());
 
@@ -27,7 +30,7 @@ async fn openai_provider_is_created_by_config_read() -> Result<()> {
         .plugin(plugin.clone())
         .build()
         .await;
-    std::env::remove_var(environment_name);
+    unsafe { std::env::remove_var(environment_name) };
     let core = core?;
 
     assert!(plugin.provider().is_some());
@@ -51,5 +54,28 @@ async fn persistence_store_is_created_by_open_project() -> Result<()> {
     assert!(plugin.store().is_some());
     assert!(core.registry.session_store().is_some());
     assert!(plugin.discover().await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn hashline_config_selects_hashline_tools() -> Result<()> {
+    let core = CoreBuilder::new()
+        .config(json!({ "tool": { "enable_hashline": true } }))
+        .plugin(Arc::new(ToolReadPlugin::new()))
+        .plugin(Arc::new(ToolGrepPlugin::new()))
+        .plugin(Arc::new(ToolPatchPlugin::new()))
+        .plugin(Arc::new(ToolPatchHashlinePlugin::new()))
+        .build()
+        .await?;
+    let names = core
+        .registry
+        .tools()
+        .into_iter()
+        .map(|tool| tool.definition().name)
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"read".into()));
+    assert!(names.contains(&"grep".into()));
+    assert!(names.contains(&"patch_hashline".into()));
+    assert!(!names.contains(&"patch".into()));
     Ok(())
 }

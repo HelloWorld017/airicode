@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use airicode::core::{
+    Tool,
     models::{
         ContextPriority, ContextSource, Message, MessagePart, Role, SessionGroupId, SessionId,
         SessionMutation, SessionState, ShellAction, ShellActionContext, ShellActionDefinition,
@@ -9,7 +10,6 @@ use airicode::core::{
     },
     operations::new_session,
     registry::Registry,
-    Tool,
 };
 use async_trait::async_trait;
 use serde_json::json;
@@ -133,7 +133,7 @@ impl Tool for TestTool {
         ToolDefinition {
             name: self.name.into(),
             description: "test".into(),
-            input: ToolInputDefinition::JsonSchema(json!({ "type": "object" })),
+            input: ToolInputDefinition::new(json!({ "type": "object" })),
         }
     }
     async fn execute(

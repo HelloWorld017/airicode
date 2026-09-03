@@ -1,19 +1,18 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
-use airicode::utils::hashline;
 use airicode::{
+    Result,
     core::{
+        Tool,
         models::{
             MessagePart, ProjectId, ProviderEvent, ProviderId, Role, RuntimeEvent, SessionGroupId,
-            ToolContext, ToolInput, ToolOutput, TurnId,
+            ToolContext, ToolOutput, TurnId,
         },
         operations::new_session,
         runtime::{TurnEngine, TurnRequest},
         workdir::{NativeWorkdir, Workdir},
-        Tool,
     },
     plugins::{ToolFindFile, ToolGrep, ToolRead, ToolReadPlugin, ToolShell, ToolShellPlugin},
-    Result,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -63,24 +62,18 @@ async fn read_and_shell_tools_use_the_shared_workdir_contract() -> Result<()> {
 
     let read = ToolRead::new();
     let output = read
-        .execute(
-            ToolInput::Json(json!({ "path": "main.rs" })),
-            context.clone(),
-        )
+        .execute(json!({ "path": "main.rs" }), context.clone())
         .await?;
     let ToolOutput::Success { content } = output else {
         panic!("read failed")
     };
-    assert!(content.starts_with("1:"));
+    assert!(content.starts_with("1|"));
     assert!(content.contains("|fn main() {}"));
 
     let shell = ToolShell::new();
-    assert!(matches!(
-        shell.definition().input,
-        airicode::core::models::ToolInputDefinition::Text
-    ));
+    assert!(shell.definition().input.freeform_parser.is_some());
     let output = shell
-        .execute(ToolInput::Text("printf shell-output".into()), context)
+        .execute(json!({ "command": "printf shell-output" }), context)
         .await?;
     let ToolOutput::Success { content } = output else {
         panic!("shell failed")
@@ -111,10 +104,7 @@ async fn read_suggests_a_corrected_path_and_grep_accepts_an_empty_path() -> Resu
 
     let read = ToolRead::new();
     let output = read
-        .execute(
-            ToolInput::Json(json!({ "path": "src/mian.rs" })),
-            context.clone(),
-        )
+        .execute(json!({ "path": "src/mian.rs" }), context.clone())
         .await?;
     assert!(matches!(
         output,
@@ -124,17 +114,10 @@ async fn read_suggests_a_corrected_path_and_grep_accepts_an_empty_path() -> Resu
 
     let grep = ToolGrep::new();
     let output = grep
-        .execute(
-            ToolInput::Json(json!({ "pattern": "needle", "path": "" })),
-            context,
-        )
+        .execute(json!({ "pattern": "needle", "path": "" }), context)
         .await?;
-    let expected = hashline::render("before\nneedle\nafter\n")
-        .into_iter()
-        .find(|line| line.line == 2)
-        .expect("matching line should exist");
     assert!(
-        matches!(output, ToolOutput::Success { content } if content == format!("./src/main.rs:2:{}|needle", expected.tag))
+        matches!(output, ToolOutput::Success { content } if content == "./src/main.rs:2|needle")
     );
     Ok(())
 }
@@ -162,9 +145,9 @@ async fn find_file_supports_exact_keyword_and_glob_queries() -> Result<()> {
     let find = ToolFindFile::new();
     let output = find
         .execute(
-            ToolInput::Json(json!({
+            json!({
                 "query": { "kind": "by_filename_exact", "filename": "main.rs" }
-            })),
+            }),
             context.clone(),
         )
         .await?;
@@ -172,10 +155,10 @@ async fn find_file_supports_exact_keyword_and_glob_queries() -> Result<()> {
 
     let output = find
         .execute(
-            ToolInput::Json(json!({
+            json!({
                 "query": { "kind": "by_filename_keyword", "keyword": "MESSAGE" },
                 "path": "src"
-            })),
+            }),
             context.clone(),
         )
         .await?;
@@ -185,9 +168,9 @@ async fn find_file_supports_exact_keyword_and_glob_queries() -> Result<()> {
 
     let output = find
         .execute(
-            ToolInput::Json(json!({
+            json!({
                 "query": { "kind": "by_glob_pattern", "pattern": "src/**/*.rs" }
-            })),
+            }),
             context.clone(),
         )
         .await?;
@@ -198,9 +181,9 @@ async fn find_file_supports_exact_keyword_and_glob_queries() -> Result<()> {
     let limited = ToolFindFile::new().with_limits(1, 128 * 1024);
     let output = limited
         .execute(
-            ToolInput::Json(json!({
+            json!({
                 "query": { "kind": "by_filename_keyword", "keyword": ".rs" }
-            })),
+            }),
             context.clone(),
         )
         .await?;
@@ -213,9 +196,9 @@ async fn find_file_supports_exact_keyword_and_glob_queries() -> Result<()> {
 
     let output = find
         .execute(
-            ToolInput::Json(json!({
+            json!({
                 "query": { "kind": "by_filename_exact", "filename": "missing.txt" }
-            })),
+            }),
             context,
         )
         .await?;
@@ -455,10 +438,12 @@ async fn failed_turn_emits_error_after_persisting_user_message() -> Result<()> {
     );
 
     let state = session.operations.snapshot().await?;
-    assert!(state
-        .visible_messages()
-        .iter()
-        .any(|message| message.role == Role::User));
+    assert!(
+        state
+            .visible_messages()
+            .iter()
+            .any(|message| message.role == Role::User)
+    );
     Ok(())
 }
 

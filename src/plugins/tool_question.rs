@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::core::{
     error::{Error, Result},
@@ -12,7 +12,7 @@ use crate::core::{
     },
     registry::PluginRegistryScope,
 };
-use crate::{core::models::NoteContent, plugins::add_tool_note};
+use crate::{core::models::NoteContent, utils::note::add_tool_note};
 
 #[allow(dead_code)]
 #[derive(JsonSchema)]
@@ -44,16 +44,11 @@ impl Tool for ToolQuestion {
         ToolDefinition {
             name: "question".into(),
             description: "Ask the user for information that the agent cannot safely infer. Provide the question and optional string choices.".into(),
-            input: ToolInputDefinition::JsonSchema(
-                crate::utils::schema::json_schema::<QuestionInputSchema>(),
-            ),
+            input: ToolInputDefinition::new(crate::utils::schema::json_schema::<QuestionInputSchema>()),
         }
     }
 
     async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {
-        let ToolInput::Json(input) = input else {
-            return Err(Error::Tool("question input must be an object".into()));
-        };
         let question = input
             .get("question")
             .and_then(Value::as_str)

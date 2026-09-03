@@ -14,7 +14,7 @@ use crate::core::{
     },
     registry::PluginRegistryScope,
 };
-use crate::plugins::add_output_note;
+use crate::utils::note::add_output_note;
 
 #[allow(dead_code)]
 #[derive(JsonSchema)]
@@ -59,16 +59,11 @@ impl Tool for ToolWebfetch {
         ToolDefinition {
             name: "webfetch".into(),
             description: "Fetch an HTTP or HTTPS URL and return a normalized response containing the status and body text. Requests have a timeout and maximum response size, support cancellation, and do not modify the workdir. Non-success HTTP statuses and network/limit failures are returned as tool failures.".into(),
-            input: ToolInputDefinition::JsonSchema(
-                crate::utils::schema::json_schema::<WebfetchInputSchema>(),
-            ),
+            input: ToolInputDefinition::new(crate::utils::schema::json_schema::<WebfetchInputSchema>()),
         }
     }
 
     async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {
-        let ToolInput::Json(input) = input else {
-            return Err(Error::Tool("webfetch input must be an object".into()));
-        };
         let url = input
             .get("url")
             .and_then(Value::as_str)

@@ -4,16 +4,16 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde_json::Value;
 
-use super::add_output_note;
 use crate::core::{
     error::{Error, Result},
+    hooks::{ConfigReadContext, ConfigReadHook},
     models::{
         CommandSpec, Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId, ToolInput,
         ToolInputDefinition, ToolOutput,
     },
     registry::PluginRegistryScope,
 };
-use crate::utils::hashline;
+use crate::utils::{hashline, note::add_output_note};
 
 #[allow(dead_code)]
 #[derive(JsonSchema)]
@@ -27,12 +27,14 @@ struct GrepInputSchema {
 struct GrepMatch {
     path: PathBuf,
     line: usize,
+    text: String,
 }
 
 pub struct ToolGrep {
     id: ToolId,
     max_output_bytes: usize,
     max_results: usize,
+    enable_hashline: bool,
 }
 
 impl ToolGrep {
@@ -41,12 +43,17 @@ impl ToolGrep {
             id: ToolId::new(),
             max_output_bytes: 128 * 1024,
             max_results: 500,
+            enable_hashline: false,
         }
     }
 
     pub fn with_limits(mut self, max_results: usize, max_output_bytes: usize) -> Self {
         self.max_results = max_results;
         self.max_output_bytes = max_output_bytes;
+        self
+    }
+    pub fn with_hashline(mut self, enable_hashline: bool) -> Self {
+        self.enable_hashline = enable_hashline;
         self
     }
 }
@@ -65,17 +72,17 @@ impl Tool for ToolGrep {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "grep".into(),
-            description: "Search files visible through the current workdir using a regular-expression pattern. `path` optionally limits the search scope and `glob` optionally filters filenames. Results include file and line references and are size-limited.".into(),
-            input: ToolInputDefinition::JsonSchema(
-                crate::utils::schema::json_schema::<GrepInputSchema>(),
-            ),
+            description: if self.enable_hashline {
+                "Search files visible through the current workdir using a regular-expression pattern. `path` optionally limits the search scope and `glob` optionally filters filenames. Results use `path:line:hash|content`, where the hashline anchor is compatible with patch_hashline, and are size-limited."
+            } else {
+                "Search files visible through the current workdir using a regular-expression pattern. `path` optionally limits the search scope and `glob` optionally filters filenames. Results use `path:line|content` and are size-limited."
+            }
+            .into(),
+            input: ToolInputDefinition::new(crate::utils::schema::json_schema::<GrepInputSchema>()),
         }
     }
 
     async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {
-        let ToolInput::Json(input) = input else {
-            return Err(Error::Tool("grep input must be an object".into()));
-        };
         let object = input
             .as_object()
             .ok_or_else(|| Error::Tool("grep input must be an object".into()))?;
@@ -173,6 +180,15 @@ impl Tool for ToolGrep {
             if context.cancellation.is_cancelled() {
                 return Err(Error::Cancelled);
             }
+            if !self.enable_hashline {
+                lines.push(format!(
+                    "{}:{}|{}",
+                    grep_match.path.display(),
+                    grep_match.line,
+                    grep_match.text.trim_end_matches(['\r', '\n'])
+                ));
+                continue;
+            }
             if !rendered_files.contains_key(&grep_match.path) {
                 let bytes = match context.workdir.read(&grep_match.path).await {
                     Ok(bytes) => bytes,
@@ -260,9 +276,15 @@ fn parse_matches(stdout: &str) -> Vec<GrepMatch> {
                 .get("line_number")
                 .and_then(Value::as_u64)
                 .and_then(|line| usize::try_from(line).ok())?;
+            let text = data
+                .get("lines")
+                .and_then(|lines| lines.get("text"))
+                .and_then(Value::as_str)?
+                .to_string();
             Some(GrepMatch {
                 path: PathBuf::from(path),
                 line,
+                text,
             })
         })
         .collect()
@@ -270,13 +292,11 @@ fn parse_matches(stdout: &str) -> Vec<GrepMatch> {
 
 pub struct ToolGrepPlugin {
     id: PluginId,
-    tool: Arc<ToolGrep>,
 }
 impl ToolGrepPlugin {
     pub fn new() -> Self {
         Self {
             id: PluginId::new(),
-            tool: Arc::new(ToolGrep::new()),
         }
     }
 }
@@ -290,6 +310,20 @@ impl Plugin for ToolGrepPlugin {
         "tool_grep"
     }
     async fn init(self: Arc<Self>, registry: PluginRegistryScope) -> Result<()> {
-        registry.register_tool(self.tool.clone(), 0).map(|_| ())
+        let hook: Arc<dyn ConfigReadHook> = self;
+        registry.register_hook(hook)
+    }
+}
+
+#[async_trait]
+impl ConfigReadHook for ToolGrepPlugin {
+    async fn config_read(&self, context: ConfigReadContext) -> Result<()> {
+        context
+            .registry
+            .register_tool(
+                Arc::new(ToolGrep::new().with_hashline(context.config.tool.enable_hashline)),
+                0,
+            )
+            .map(|_| ())
     }
 }

@@ -4,9 +4,16 @@ use serde_json::{Map, Value};
 
 use super::error::{Error, Result};
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ToolConfig {
+    pub enable_hashline: bool,
+    pub freeform: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Config {
     pub raw: Value,
+    pub tool: ToolConfig,
     pub plugin_namespaces: BTreeMap<String, Value>,
 }
 
@@ -18,6 +25,28 @@ impl Config {
 
 pub fn aggregate(raw: Value, schemas: &[(String, Value)]) -> Result<Config> {
     let root = raw.as_object().cloned().unwrap_or_default();
+    let tool_value = root
+        .get("tool")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    let tool_schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "enable_hashline": { "type": "boolean" },
+            "freeform": { "type": "boolean" }
+        }
+    });
+    validate_shape(&tool_value, &tool_schema, "tool")?;
+    let tool = ToolConfig {
+        enable_hashline: tool_value
+            .get("enable_hashline")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        freeform: tool_value
+            .get("freeform")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    };
     let plugins = root
         .get("plugins")
         .cloned()
@@ -37,6 +66,7 @@ pub fn aggregate(raw: Value, schemas: &[(String, Value)]) -> Result<Config> {
     }
     Ok(Config {
         raw,
+        tool,
         plugin_namespaces: namespaces,
     })
 }

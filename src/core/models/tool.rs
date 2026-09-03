@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::Deserialize;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -26,19 +25,44 @@ impl ToolOutput {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub enum ToolInputDefinition {
-    JsonSchema(Value),
-    Text,
+pub type ToolFreeformParser = fn(&str) -> Result<Value>;
+pub type ToolInput = Value;
+
+#[derive(Clone, Debug)]
+pub struct ToolInputDefinition {
+    pub schema: Value,
+    pub freeform_parser: Option<ToolFreeformParser>,
+}
+
+impl PartialEq for ToolInputDefinition {
+    fn eq(&self, other: &Self) -> bool {
+        self.schema == other.schema
+            && self.freeform_parser.is_some() == other.freeform_parser.is_some()
+    }
+}
+
+impl ToolInputDefinition {
+    pub fn new(schema: Value) -> Self {
+        Self {
+            schema,
+            freeform_parser: None,
+        }
+    }
+
+    pub fn with_freeform_parser(mut self, parser: ToolFreeformParser) -> Self {
+        self.freeform_parser = Some(parser);
+        self
+    }
+
+    pub fn parse_freeform(&self, input: &str) -> Result<Value> {
+        let parser = self.freeform_parser.ok_or_else(|| {
+            super::super::error::Error::Tool("tool does not support freeform input".into())
+        })?;
+        parser(input)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum ToolInput {
-    Json(Value),
-    Text(String),
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,

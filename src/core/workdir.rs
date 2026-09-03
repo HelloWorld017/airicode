@@ -126,6 +126,13 @@ impl Workdir for NativeWorkdir {
         Ok(())
     }
 
+    async fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+        let destination = self.writable_path(to).await?;
+        fs::rename(self.logical_path(from), destination)
+            .await
+            .map_err(|error| Error::Workdir(format!("{}: {error}", from.display())))
+    }
+
     async fn remove(&self, path: &Path) -> Result<()> {
         fs::remove_file(self.logical_path(path)).await?;
         Ok(())

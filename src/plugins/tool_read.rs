@@ -4,17 +4,17 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde_json::Value;
 
-use crate::plugins::add_output_note;
 use crate::{
     core::{
         error::{Error, Result},
+        hooks::{ConfigReadContext, ConfigReadHook},
         models::{
             Plugin, PluginId, Tool, ToolContext, ToolDefinition, ToolId, ToolInput,
             ToolInputDefinition, ToolOutput,
         },
         registry::PluginRegistryScope,
     },
-    utils::{hashline, path_correction, PathCorrectionKind},
+    utils::{PathCorrectionKind, hashline, note::add_output_note, path_correction},
 };
 
 #[allow(dead_code)]
@@ -31,6 +31,7 @@ pub struct ToolRead {
     id: ToolId,
     max_lines: usize,
     max_bytes: usize,
+    enable_hashline: bool,
 }
 
 impl ToolRead {
@@ -39,11 +40,16 @@ impl ToolRead {
             id: ToolId::new(),
             max_lines: 2_000,
             max_bytes: 256 * 1024,
+            enable_hashline: false,
         }
     }
     pub fn with_limits(mut self, max_lines: usize, max_bytes: usize) -> Self {
         self.max_lines = max_lines;
         self.max_bytes = max_bytes;
+        self
+    }
+    pub fn with_hashline(mut self, enable_hashline: bool) -> Self {
+        self.enable_hashline = enable_hashline;
         self
     }
 }
@@ -62,16 +68,15 @@ impl Tool for ToolRead {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "read".into(),
-            description: r#"Read a UTF-8 text file from the current workdir and return hashline-annotated lines in the form `<line>:<3-character-hash>|<content>`. Use this output as the source of truth before patching: copy only the `<line>:<hash>` prefix into a patch anchor, without the `|` or source text. `start_line` and `end_line` are optional inclusive line limits. Binary/NUL-containing files and requests beyond the configured size or line limits fail."#.into(),
-            input: ToolInputDefinition::JsonSchema(
-                crate::utils::schema::json_schema::<ReadInputSchema>(),
-            ),
+            description: if self.enable_hashline {
+                "Read a UTF-8 text file from the current workdir and return hashline-annotated lines in the form `<line>:<3-character-hash>|<content>`. Copy only the `<line>:<hash>` prefix into a patch_hashline anchor. `start_line` and `end_line` are optional inclusive line limits. Binary/NUL-containing files and requests beyond the configured size or line limits fail."
+            } else {
+                "Read a UTF-8 text file from the current workdir and return numbered lines in the form `<line>|<content>`. `start_line` and `end_line` are optional inclusive line limits. Binary/NUL-containing files and requests beyond the configured size or line limits fail."
+            }.into(),
+            input: ToolInputDefinition::new(crate::utils::schema::json_schema::<ReadInputSchema>()),
         }
     }
     async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {
-        let ToolInput::Json(input) = input else {
-            return Err(Error::Tool("read input must be an object".into()));
-        };
         let object = input
             .as_object()
             .ok_or_else(|| Error::Tool("read input must be an object".into()))?;
@@ -147,7 +152,13 @@ impl Tool for ToolRead {
         let selected = all
             .into_iter()
             .filter(|line| line.line >= start && line.line <= end)
-            .map(|line| format!("{}:{}|{}", line.line, line.tag, line.text))
+            .map(|line| {
+                if self.enable_hashline {
+                    format!("{}:{}|{}", line.line, line.tag, line.text)
+                } else {
+                    format!("{}|{}", line.line, line.text)
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let range = if let Some(end) = object.get("end_line").and_then(Value::as_u64) {
@@ -165,17 +176,12 @@ impl Tool for ToolRead {
 
 pub struct ToolReadPlugin {
     id: PluginId,
-    tool: Arc<ToolRead>,
 }
 impl ToolReadPlugin {
     pub fn new() -> Self {
         Self {
             id: PluginId::new(),
-            tool: Arc::new(ToolRead::new()),
         }
-    }
-    pub fn tool(&self) -> Arc<ToolRead> {
-        self.tool.clone()
     }
 }
 
@@ -188,6 +194,20 @@ impl Plugin for ToolReadPlugin {
         "tool_read"
     }
     async fn init(self: Arc<Self>, registry: PluginRegistryScope) -> Result<()> {
-        registry.register_tool(self.tool.clone(), 0).map(|_| ())
+        let hook: Arc<dyn ConfigReadHook> = self;
+        registry.register_hook(hook)
+    }
+}
+
+#[async_trait]
+impl ConfigReadHook for ToolReadPlugin {
+    async fn config_read(&self, context: ConfigReadContext) -> Result<()> {
+        context
+            .registry
+            .register_tool(
+                Arc::new(ToolRead::new().with_hashline(context.config.tool.enable_hashline)),
+                0,
+            )
+            .map(|_| ())
     }
 }

@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::core::{
     error::{Error, Result},
@@ -16,7 +16,7 @@ use crate::core::{
     models::{
         FinishReason, Message, MessagePart, MessagePartContent, Model, ModelCapabilities, Plugin,
         PluginId, Provider, ProviderEvent, ProviderId, ProviderRequest, ProviderStream, Role,
-        ToolCallId, ToolInputDefinition, Usage,
+        ToolCallId, Usage,
     },
     registry::PluginRegistryScope,
 };
@@ -26,6 +26,7 @@ pub struct OpenAiProvider {
     id: ProviderId,
     api_key: Arc<RwLock<String>>,
     base_url: Arc<RwLock<String>>,
+    freeform: bool,
     client: Client,
 }
 
@@ -35,6 +36,7 @@ impl OpenAiProvider {
             id,
             api_key: Arc::new(RwLock::new(api_key.into())),
             base_url: Arc::new(RwLock::new("https://openrouter.ai/api/v1".into())),
+            freeform: false,
             client: Client::new(),
         }
     }
@@ -51,6 +53,11 @@ impl OpenAiProvider {
 
     pub fn with_client(mut self, client: Client) -> Self {
         self.client = client;
+        self
+    }
+
+    pub fn with_freeform(mut self, freeform: bool) -> Self {
+        self.freeform = freeform;
         self
     }
 
@@ -125,7 +132,7 @@ impl Provider for OpenAiProvider {
 
     async fn request(&self, request: ProviderRequest) -> Result<ProviderStream> {
         let provider_id = self.id;
-        let body = responses_body(&request, provider_id);
+        let body = responses_body(&request, provider_id, self.freeform);
         let response = self
             .client
             .post(self.endpoint("/responses"))
@@ -174,9 +181,10 @@ impl Provider for OpenAiProvider {
                     let event = serde_json::from_str::<Value>(data).map_err(|error| {
                         Error::Provider(format!("invalid OpenAI Responses event: {error}"))
                     })?;
-                    for event in response_events(
+                    for event in response_events_with_tools(
                         event,
                         provider_id,
+                        &request.tools,
                         &mut output_items,
                         &mut saw_tool_call,
                     )? {
@@ -189,11 +197,11 @@ impl Provider for OpenAiProvider {
     }
 }
 
-fn responses_body(request: &ProviderRequest, provider_id: ProviderId) -> Value {
+fn responses_body(request: &ProviderRequest, provider_id: ProviderId, freeform: bool) -> Value {
     json!({
         "model": request.model,
-        "input": responses_input(&request.messages, provider_id, &request.tools),
-        "tools": request.tools.iter().map(responses_tool).collect::<Vec<_>>(),
+        "input": responses_input(&request.messages, provider_id, &request.tools, freeform),
+        "tools": request.tools.iter().map(|tool| responses_tool(tool, freeform)).collect::<Vec<_>>(),
         "stream": true,
         "store": false,
         "include": ["reasoning.encrypted_content"],
@@ -201,19 +209,24 @@ fn responses_body(request: &ProviderRequest, provider_id: ProviderId) -> Value {
     })
 }
 
-fn responses_tool(tool: &crate::core::models::ToolDefinition) -> Value {
-    match &tool.input {
-        ToolInputDefinition::JsonSchema(schema) => json!({
-            "type": "function",
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": schema,
-        }),
-        ToolInputDefinition::Text => json!({
+fn uses_freeform(tool: &crate::core::models::ToolDefinition, freeform: bool) -> bool {
+    freeform && tool.input.freeform_parser.is_some()
+}
+
+fn responses_tool(tool: &crate::core::models::ToolDefinition, freeform: bool) -> Value {
+    if uses_freeform(tool, freeform) {
+        json!({
             "type": "custom",
             "name": tool.name,
             "description": tool.description,
-        }),
+        })
+    } else {
+        json!({
+            "type": "function",
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.input.schema,
+        })
     }
 }
 
@@ -221,6 +234,7 @@ fn responses_input(
     messages: &[std::sync::Arc<Message>],
     provider_id: ProviderId,
     tools: &[crate::core::models::ToolDefinition],
+    freeform: bool,
 ) -> Vec<Value> {
     let mut input = Vec::new();
     for message in messages {
@@ -246,9 +260,9 @@ fn responses_input(
                     name,
                     arguments,
                 } => {
-                    let text_input = tools.iter().any(|tool| {
-                        tool.name == *name && matches!(tool.input, ToolInputDefinition::Text)
-                    });
+                    let text_input = tools
+                        .iter()
+                        .any(|tool| tool.name == *name && uses_freeform(tool, freeform));
                     if text_input {
                         input.push(json!({
                             "type": "custom_tool_call",
@@ -299,9 +313,20 @@ fn response_function_arguments(arguments: &Value) -> String {
     serde_json::to_string(arguments).unwrap_or_else(|_| arguments.to_string())
 }
 
+#[cfg(test)]
 fn response_events(
     event: Value,
     provider_id: ProviderId,
+    output_items: &mut BTreeMap<u32, Value>,
+    saw_tool_call: &mut bool,
+) -> Result<Vec<ProviderEvent>> {
+    response_events_with_tools(event, provider_id, &[], output_items, saw_tool_call)
+}
+
+fn response_events_with_tools(
+    event: Value,
+    provider_id: ProviderId,
+    tools: &[crate::core::models::ToolDefinition],
     output_items: &mut BTreeMap<u32, Value>,
     saw_tool_call: &mut bool,
 ) -> Result<Vec<ProviderEvent>> {
@@ -336,7 +361,7 @@ fn response_events(
             output_items.insert(index, item.clone());
             result.push(ProviderEvent::OutputPart {
                 index,
-                part: output_item_part(provider_id, item),
+                part: output_item_part(provider_id, item, tools)?,
             });
         }
         "response.output_text.delta" => {
@@ -442,8 +467,12 @@ fn response_events(
     Ok(result)
 }
 
-fn output_item_part(provider_id: ProviderId, item: Value) -> MessagePart {
-    match item.get("type").and_then(Value::as_str) {
+fn output_item_part(
+    provider_id: ProviderId,
+    item: Value,
+    tools: &[crate::core::models::ToolDefinition],
+) -> Result<MessagePart> {
+    Ok(match item.get("type").and_then(Value::as_str) {
         Some("message") => {
             let text = item
                 .get("content")
@@ -479,10 +508,10 @@ fn output_item_part(provider_id: ProviderId, item: Value) -> MessagePart {
         }
         Some("function_call") => {
             let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
-                return MessagePart::provider_only(provider_id, item);
+                return Ok(MessagePart::provider_only(provider_id, item));
             };
             let Some(name) = item.get("name").and_then(Value::as_str) else {
-                return MessagePart::provider_only(provider_id, item);
+                return Ok(MessagePart::provider_only(provider_id, item));
             };
             let arguments = item
                 .get("arguments")
@@ -501,23 +530,29 @@ fn output_item_part(provider_id: ProviderId, item: Value) -> MessagePart {
         }
         Some("custom_tool_call") => {
             let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
-                return MessagePart::provider_only(provider_id, item);
+                return Ok(MessagePart::provider_only(provider_id, item));
             };
             let Some(name) = item.get("name").and_then(Value::as_str) else {
-                return MessagePart::provider_only(provider_id, item);
+                return Ok(MessagePart::provider_only(provider_id, item));
             };
             let Some(input) = item.get("input").and_then(Value::as_str) else {
-                return MessagePart::provider_only(provider_id, item);
+                return Ok(MessagePart::provider_only(provider_id, item));
+            };
+            let arguments = match tools.iter().find(|tool| tool.name == name) {
+                Some(tool) => tool.input.parse_freeform(input).map_err(|error| {
+                    Error::Provider(format!("invalid freeform input for {name}: {error}"))
+                })?,
+                None => Value::String(input.to_string()),
             };
             MessagePart::tool_call(
                 ToolCallId::from_external(call_id),
                 name.to_string(),
-                Value::String(input.to_string()),
+                arguments,
             )
             .with_provider_data(provider_id, item)
         }
         _ => MessagePart::provider_only(provider_id, item),
-    }
+    })
 }
 
 fn required_u32(event: &Value, field: &str) -> Result<u32> {
@@ -650,7 +685,9 @@ impl ConfigReadHook for OpenAiProviderPlugin {
             .unwrap_or("OPENAI_API_KEY");
         let key =
             std::env::var(key_env).map_err(|_| Error::Config(format!("{key_env} is not set")))?;
-        let provider = Arc::new(OpenAiProvider::new(self.provider_id, key));
+        let provider = Arc::new(
+            OpenAiProvider::new(self.provider_id, key).with_freeform(context.config.tool.freeform),
+        );
         if let Some(base_url) = config.get("base_url").and_then(Value::as_str) {
             provider.set_base_url(base_url.to_string());
         }
@@ -671,7 +708,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::core::models::{ToolDefinition, ToolOutput};
+    use crate::core::models::{ToolDefinition, ToolInputDefinition, ToolOutput};
     use tokio_util::sync::CancellationToken;
 
     #[test]
@@ -714,6 +751,7 @@ mod tests {
             ],
             provider_id,
             &[],
+            false,
         );
 
         assert_eq!(input[0], native);
@@ -733,11 +771,11 @@ mod tests {
             tools: vec![ToolDefinition {
                 name: "read".into(),
                 description: "read a file".into(),
-                input: ToolInputDefinition::JsonSchema(serde_json::json!({ "type": "object" })),
+                input: ToolInputDefinition::new(serde_json::json!({ "type": "object" })),
             }],
             cancellation: CancellationToken::new(),
         };
-        let body = responses_body(&request, ProviderId::new());
+        let body = responses_body(&request, ProviderId::new(), false);
         assert_eq!(body["stream"], true);
         assert_eq!(body["store"], false);
         assert_eq!(body["include"][0], "reasoning.encrypted_content");
@@ -748,20 +786,43 @@ mod tests {
     }
 
     #[test]
-    fn responses_body_maps_text_tools_to_custom_tools() {
+    fn responses_body_uses_custom_tools_only_when_freeform_is_enabled() {
         let tools = vec![
             ToolDefinition {
                 name: "shell".into(),
                 description: "run a command".into(),
-                input: ToolInputDefinition::Text,
+                input: ToolInputDefinition::new(serde_json::json!({ "type": "object" }))
+                    .with_freeform_parser(crate::plugins::tool_shell::parse_shell_freeform),
             },
             ToolDefinition {
-                name: "read".into(),
-                description: "read a file".into(),
-                input: ToolInputDefinition::JsonSchema(serde_json::json!({
+                name: "fs_write".into(),
+                description: "write a file".into(),
+                input: ToolInputDefinition::new(serde_json::json!({
                     "type": "object",
                     "properties": { "path": { "type": "string" } }
-                })),
+                }))
+                .with_freeform_parser(crate::plugins::tool_fs_write::parse_fs_write_freeform),
+            },
+            ToolDefinition {
+                name: "apply_patch".into(),
+                description: "apply a patch".into(),
+                input: ToolInputDefinition::new(serde_json::json!({ "type": "object" }))
+                    .with_freeform_parser(
+                        crate::plugins::tool_patch_apply_patch::parse_apply_patch_freeform,
+                    ),
+            },
+            ToolDefinition {
+                name: "patch_hashline".into(),
+                description: "apply a hashline patch".into(),
+                input: ToolInputDefinition::new(serde_json::json!({ "type": "object" }))
+                    .with_freeform_parser(
+                        crate::plugins::tool_patch_hashline::parse_patch_hashline_freeform,
+                    ),
+            },
+            ToolDefinition {
+                name: "patch".into(),
+                description: "apply replacements".into(),
+                input: ToolInputDefinition::new(serde_json::json!({ "type": "object" })),
             },
         ];
         let request = ProviderRequest {
@@ -770,11 +831,18 @@ mod tests {
             tools,
             cancellation: CancellationToken::new(),
         };
-        let body = responses_body(&request, ProviderId::new());
-        assert_eq!(body["tools"][0]["type"], "custom");
-        assert!(body["tools"][0].get("parameters").is_none());
-        assert_eq!(body["tools"][1]["type"], "function");
-        assert_eq!(body["tools"][1]["parameters"]["type"], "object");
+        let json_body = responses_body(&request, ProviderId::new(), false);
+        for tool in json_body["tools"].as_array().unwrap() {
+            assert_eq!(tool["type"], "function");
+            assert_eq!(tool["parameters"]["type"], "object");
+        }
+
+        let freeform_body = responses_body(&request, ProviderId::new(), true);
+        for tool in &freeform_body["tools"].as_array().unwrap()[..4] {
+            assert_eq!(tool["type"], "custom");
+            assert!(tool.get("parameters").is_none());
+        }
+        assert_eq!(freeform_body["tools"][4]["type"], "function");
     }
 
     #[test]
@@ -782,7 +850,8 @@ mod tests {
         let shell = ToolDefinition {
             name: "shell".into(),
             description: "run a command".into(),
-            input: ToolInputDefinition::Text,
+            input: ToolInputDefinition::new(serde_json::json!({ "type": "object" }))
+                .with_freeform_parser(crate::plugins::tool_shell::parse_shell_freeform),
         };
         let message = Message {
             content: vec![MessagePart::tool_call(
@@ -792,7 +861,7 @@ mod tests {
             )],
             ..Message::text(Role::Assistant, "", "build", None)
         };
-        let input = responses_input(&[Arc::new(message)], ProviderId::new(), &[shell]);
+        let input = responses_input(&[Arc::new(message)], ProviderId::new(), &[shell], true);
         assert_eq!(input[0]["type"], "custom_tool_call");
         assert_eq!(input[0]["name"], "shell");
         assert_eq!(input[0]["input"], "printf hello");
@@ -943,6 +1012,48 @@ mod tests {
                     && arguments == &Value::String("printf hello".into())
         ));
         assert!(saw_tool_call);
+        Ok(())
+    }
+
+    #[test]
+    fn custom_tool_calls_store_parsed_canonical_arguments() -> crate::Result<()> {
+        let provider_id = ProviderId::new();
+        let shell = ToolDefinition {
+            name: "shell".into(),
+            description: "run a command".into(),
+            input: ToolInputDefinition::new(serde_json::json!({ "type": "object" }))
+                .with_freeform_parser(crate::plugins::tool_shell::parse_shell_freeform),
+        };
+        let mut output_items = BTreeMap::new();
+        let mut saw_tool_call = false;
+        let events = response_events_with_tools(
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "custom_tool_call",
+                    "call_id": "call_shell",
+                    "name": "shell",
+                    "input": "printf hello"
+                }
+            }),
+            provider_id,
+            &[shell],
+            &mut output_items,
+            &mut saw_tool_call,
+        )?;
+        let ProviderEvent::OutputPart { part, .. } = &events[0] else {
+            panic!("expected finalized custom tool part")
+        };
+        assert!(matches!(
+            part.content.as_ref(),
+            Some(MessagePartContent::ToolCall { arguments, .. })
+                if arguments == &serde_json::json!({ "command": "printf hello" })
+        ));
+        assert_eq!(
+            part.provider_data.as_ref().unwrap().data["input"],
+            "printf hello"
+        );
         Ok(())
     }
 

@@ -8,7 +8,7 @@ use crate::core::{
     },
     registry::PluginRegistryScope,
 };
-use crate::{core::models::NoteContent, plugins::add_tool_note};
+use crate::{core::models::NoteContent, utils::note::add_tool_note};
 use async_trait::async_trait;
 
 pub struct ToolShell {
@@ -41,14 +41,20 @@ impl Tool for ToolShell {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "shell".into(),
-            description: "Execute raw shell command text in the current workdir. Pass a string, not a JSON object. The command runs through the Workdir abstraction so its root, worktree, and sandbox layers are respected. The result includes the exit status and captured stdout/stderr; a non-zero exit status is a tool failure.".into(),
-            input: ToolInputDefinition::Text,
+            description: "Execute a shell command in the current workdir. Pass `{ \"command\": \"...\" }`. The command runs through the Workdir abstraction so its root, worktree, and sandbox layers are respected. The result includes the exit status and captured stdout/stderr; a non-zero exit status is a tool failure.".into(),
+            input: ToolInputDefinition::new(serde_json::json!({
+                "type": "object",
+                "properties": { "command": { "type": "string" } },
+                "required": ["command"]
+            })).with_freeform_parser(parse_shell_freeform),
         }
     }
     async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {
-        let ToolInput::Text(command) = input else {
-            return Err(Error::Tool("shell input must be text".into()));
-        };
+        let command = input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| Error::Tool("shell requires command".into()))?
+            .to_string();
         #[cfg(windows)]
         let spec = CommandSpec {
             program: "cmd".into(),
@@ -128,6 +134,10 @@ impl Tool for ToolShell {
             Ok(ToolOutput::Failure { content })
         }
     }
+}
+
+pub fn parse_shell_freeform(input: &str) -> Result<serde_json::Value> {
+    Ok(serde_json::json!({ "command": input }))
 }
 
 pub struct ToolShellPlugin {

@@ -5,7 +5,6 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::add_output_note;
 use crate::core::{
     error::{Error, Result},
     models::{
@@ -14,6 +13,7 @@ use crate::core::{
     },
     registry::PluginRegistryScope,
 };
+use crate::utils::note::add_output_note;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -69,16 +69,11 @@ impl Tool for ToolFindFile {
         ToolDefinition {
             name: "find_file".into(),
             description: "Find files using exactly one query: a case-insensitive basename keyword, an exact basename, or a filesystem-relative glob pattern. `path` optionally limits the search root and `max_results` limits output.".into(),
-            input: ToolInputDefinition::JsonSchema(
-                crate::utils::schema::json_schema::<FindFileInputSchema>(),
-            ),
+            input: ToolInputDefinition::new(crate::utils::schema::json_schema::<FindFileInputSchema>()),
         }
     }
 
     async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {
-        let ToolInput::Json(input) = input else {
-            return Err(Error::Tool("find_file input must be an object".into()));
-        };
         let input = parse_input(input).map_err(|error| {
             Error::Tool(format!(
                 "find_file input is invalid: {error}. Expected an object with exactly one query variant: by_filename_keyword, by_filename_exact, or by_glob_pattern."
@@ -322,9 +317,7 @@ mod tests {
 
     #[test]
     fn definition_exposes_one_of_query_variants() {
-        let ToolInputDefinition::JsonSchema(schema) = ToolFindFile::new().definition().input else {
-            panic!("find_file must use a JSON schema")
-        };
+        let schema = ToolFindFile::new().definition().input.schema;
         fn contains_one_of(value: &Value) -> bool {
             match value {
                 Value::Object(object) => {

@@ -1,11 +1,12 @@
 use std::{path::PathBuf, sync::Arc};
 
 use airicode::{
-    core::{project_from_path, CoreBuilder, SessionGroupId},
+    core::{CoreBuilder, SessionGroupId, project_from_path},
     plugins::{
         InstructionBasePlugin, OpenAiProviderPlugin, PersistencePlugin, ToolFindFilePlugin,
-        ToolGrepPlugin, ToolPatchPlugin, ToolQuestionPlugin, ToolReadPlugin, ToolShellPlugin,
-        ToolTodoPlugin, ToolWebfetchPlugin,
+        ToolFsDeletePlugin, ToolFsRenamePlugin, ToolFsWritePlugin, ToolGrepPlugin,
+        ToolPatchApplyPatchPlugin, ToolPatchHashlinePlugin, ToolPatchPlugin, ToolQuestionPlugin,
+        ToolReadPlugin, ToolShellPlugin, ToolTodoPlugin, ToolWebfetchPlugin,
     },
     ui::terminal::TerminalApp,
 };
@@ -28,6 +29,11 @@ async fn main() -> airicode::Result<()> {
         .plugin(Arc::new(ToolReadPlugin::new()))
         .plugin(Arc::new(ToolShellPlugin::new()))
         .plugin(Arc::new(ToolPatchPlugin::new()))
+        .plugin(Arc::new(ToolPatchHashlinePlugin::new()))
+        .plugin(Arc::new(ToolPatchApplyPatchPlugin::new()))
+        .plugin(Arc::new(ToolFsWritePlugin::new()))
+        .plugin(Arc::new(ToolFsRenamePlugin::new()))
+        .plugin(Arc::new(ToolFsDeletePlugin::new()))
         .plugin(Arc::new(ToolGrepPlugin::new()))
         .plugin(Arc::new(ToolFindFilePlugin::new()))
         .plugin(Arc::new(ToolTodoPlugin::new()))

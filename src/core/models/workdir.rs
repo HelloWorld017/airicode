@@ -42,6 +42,7 @@ pub trait Workdir: Send + Sync {
     async fn list(&self, path: &Path) -> Result<Vec<WorkdirEntry>>;
     async fn read(&self, path: &Path) -> Result<Vec<u8>>;
     async fn write(&self, path: &Path, data: &[u8]) -> Result<()>;
+    async fn rename(&self, from: &Path, to: &Path) -> Result<()>;
     async fn remove(&self, path: &Path) -> Result<()>;
     async fn execute(
         &self,

@@ -13,8 +13,7 @@ use super::{
     models::{
         ContextContributionPosition, ContextPriority, ContextSource, FinishReason, Message,
         MessagePart, MessagePartContent, NoteContent, ProjectId, ProviderEvent, ProviderRequest,
-        Role, RuntimeEvent, SessionGroupId, SessionId, ToolCallId, ToolInput, ToolInputDefinition,
-        ToolOutput, TurnId,
+        Role, RuntimeEvent, SessionGroupId, SessionId, ToolCallId, ToolInput, ToolOutput, TurnId,
     },
     operations::Operations,
     registry::Registry,
@@ -154,12 +153,7 @@ impl TurnEngine {
                 })
                 .await?;
             messages = materialize_context(messages, contributions, turn_id, &request.mode);
-            let tools = self
-                .registry
-                .tools()
-                .into_iter()
-                .map(|tool| tool.definition())
-                .collect();
+            let tools = self.tools_for_model(&request.model);
             for (_, hook) in self.registry.hooks().before_provider_request.clone() {
                 hook.before_provider_request(BeforeProviderRequestContext {
                     turn_id,
@@ -318,6 +312,7 @@ impl TurnEngine {
                         id: ToolCallId::new(),
                         name: String::new(),
                         arguments: String::new(),
+                        canonical_arguments: None,
                         custom: false,
                         input_done: true,
                     });
@@ -339,6 +334,7 @@ impl TurnEngine {
                         id: ToolCallId::new(),
                         name: String::new(),
                         arguments: String::new(),
+                        canonical_arguments: None,
                         custom: true,
                         input_done: false,
                     });
@@ -364,6 +360,7 @@ impl TurnEngine {
                         id: ToolCallId::new(),
                         name: String::new(),
                         arguments: String::new(),
+                        canonical_arguments: None,
                         custom: true,
                         input_done: true,
                     });
@@ -401,6 +398,7 @@ impl TurnEngine {
                                 Value::String(arguments) => arguments.clone(),
                                 arguments => arguments.to_string(),
                             },
+                            canonical_arguments: Some(arguments.clone()),
                             custom: part
                                 .provider_data
                                 .as_ref()
@@ -410,9 +408,7 @@ impl TurnEngine {
                                 || self
                                     .registry
                                     .tool_by_name(name)
-                                    .map(|tool| {
-                                        matches!(tool.definition().input, ToolInputDefinition::Text)
-                                    })
+                                    .map(|tool| tool.definition().input.freeform_parser.is_some())
                                     .unwrap_or(false),
                             input_done: true,
                         },
@@ -431,8 +427,18 @@ impl TurnEngine {
                 parts.push(MessagePart::text(text));
             }
             for call in calls.values() {
-                let arguments = serde_json::from_str(&call.arguments)
-                    .unwrap_or_else(|_| Value::String(call.arguments.clone()));
+                let arguments = match &call.canonical_arguments {
+                    Some(arguments) => arguments.clone(),
+                    None if call.custom => self
+                        .registry
+                        .tool_by_name(&call.name)
+                        .ok_or_else(|| Error::Provider(format!("unknown tool: {}", call.name)))?
+                        .definition()
+                        .input
+                        .parse_freeform(&call.arguments)?,
+                    None => serde_json::from_str(&call.arguments)
+                        .unwrap_or_else(|_| Value::String(call.arguments.clone())),
+                };
                 parts.push(MessagePart::tool_call(
                     call.id.clone(),
                     call.name.clone(),
@@ -483,14 +489,11 @@ impl TurnEngine {
             })
             .await?;
         }
-        let input = match tool.definition().input {
-            ToolInputDefinition::Text => ToolInput::Text(call.arguments),
-            ToolInputDefinition::JsonSchema(_) => {
-                let arguments = call.arguments;
-                ToolInput::Json(
-                    serde_json::from_str::<Value>(&arguments).unwrap_or(Value::String(arguments)),
-                )
-            }
+        let input: ToolInput = match call.canonical_arguments {
+            Some(arguments) => arguments,
+            None if call.custom => tool.definition().input.parse_freeform(&call.arguments)?,
+            None => serde_json::from_str::<Value>(&call.arguments)
+                .unwrap_or(Value::String(call.arguments)),
         };
         let context = super::models::ToolContext {
             project_id: request.project_id,
@@ -528,6 +531,36 @@ impl TurnEngine {
             .await?;
         }
         Ok((call.id, output))
+    }
+
+    fn tools_for_model(&self, model: &str) -> Vec<super::models::ToolDefinition> {
+        let tools = self.registry.tools();
+        let hashline = tools
+            .iter()
+            .find(|tool| tool.definition().name == "patch_hashline");
+        let apply_patch = tools
+            .iter()
+            .find(|tool| tool.definition().name == "apply_patch");
+        let patch = tools.iter().find(|tool| tool.definition().name == "patch");
+        let selected_patch = hashline
+            .or_else(|| {
+                model
+                    .to_ascii_lowercase()
+                    .contains("gpt")
+                    .then_some(apply_patch)
+                    .flatten()
+            })
+            .or(patch);
+        let selected_patch_id = selected_patch.map(|tool| tool.id());
+        tools
+            .into_iter()
+            .filter(|tool| {
+                let name = tool.definition().name;
+                !matches!(name.as_str(), "patch" | "patch_hashline" | "apply_patch")
+                    || selected_patch_id.is_some_and(|selected| selected == tool.id())
+            })
+            .map(|tool| tool.definition())
+            .collect()
     }
 
     async fn commit_tool_result(
@@ -615,6 +648,7 @@ struct AssembledCall {
     id: ToolCallId,
     name: String,
     arguments: String,
+    canonical_arguments: Option<Value>,
     custom: bool,
     input_done: bool,
 }

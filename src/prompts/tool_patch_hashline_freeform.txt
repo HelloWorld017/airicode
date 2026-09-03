@@ -1,0 +1,86 @@
+Apply a raw text patch to files in the current workdir.
+
+Do not use standard unified diff or `apply_patch` syntax. Do not emit
+`*** Begin Patch`, `*** Add File`, `*** Update File`, `*** Delete File`, `@@`, or
+`File:` markers. Do not wrap the patch in a Markdown code fence.
+
+## Input format
+
+Write one or more operations with one operation header at the beginning of a
+line. Heredoc content is literal text: blank lines, leading spaces, and lines
+starting with `+` or `-` are preserved exactly.
+
+The heredoc closing tag must be the only text on its line. Use a tag that does
+not occur by itself on a content line.
+
+### ADD
+
+`ADD path <<<TAG`
+`content`
+`TAG`
+
+`ADD` creates a new file and fails if the file already exists.
+
+Example:
+
+ADD src/example.rs <<<EOF
+use std::fmt;
+
+pub fn example() {}
+EOF
+
+### REPLACE
+
+`REPLACE path FROM start-anchor TO end-anchor <<<TAG`
+`replacement content`
+`TAG`
+
+Anchors use the form `<line>:<3-character-hash>`, without the `|` from the
+`read` output. For anchors, use the exact copy from the `read` output.
+The range is inclusive. Hashes are matched first; line numbers disambiguate repeated hashes.
+
+Example:
+
+REPLACE src/mod.rs FROM 14:241 TO 15:aC9 <<<EOF
+pub mod replaced;
+EOF
+
+### INSERT
+
+`INSERT path BEFORE anchor <<<TAG`
+`content`
+`TAG`
+
+or:
+
+`INSERT path AFTER anchor <<<TAG`
+`content`
+`TAG`
+
+The content is inserted immediately before or after the anchored line.
+
+Example:
+
+INSERT src/mod.rs BEFORE 16:e3b <<<EOF
+pub mod new;
+EOF
+
+### DELETE
+
+`DELETE path`
+
+`DELETE` removes the entire existing file and has no body.
+
+Example:
+
+DELETE src/obsolete.rs
+
+## Rules
+
+- Read the file before patching and use its hashline output.
+- NEVER invent, shorten, or recompute an anchor.
+  Instead, use read tool to get the current exact hash.
+- Do not include `|` or the source text in an anchor.
+- Use separate operations for separate ranges.
+- A missing or ambiguous anchor is stale; read the file again and build a new
+  patch instead of retrying the old input.
