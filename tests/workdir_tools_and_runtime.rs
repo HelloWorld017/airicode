@@ -143,13 +143,30 @@ async fn file_context_hook_uses_full_source_for_read_and_grep() -> Result<()> {
     let read = core.registry().tool_by_name("read").expect("read tool");
     let output = read
         .execute(
-            json!({ "path": "main.txt", "start_line": 2, "end_line": 2 }),
+            json!({ "path": "main.txt", "line_start": 2, "line_end": 2 }),
             context.clone(),
         )
         .await?;
     assert!(
         matches!(output, ToolOutput::Success { content } if content == format!("2:{expected}|needle"))
     );
+
+    let reversed = read
+        .execute(
+            json!({ "path": "main.txt", "line_start": 3, "line_end": 1 }),
+            context.clone(),
+        )
+        .await?;
+    let lines = hashline::render("before\nneedle\nafter\n");
+    assert!(matches!(
+        reversed,
+        ToolOutput::Success { content }
+            if content
+                == format!(
+                    "1:{}|before\n2:{}|needle\n3:{}|after",
+                    lines[0].tag, lines[1].tag, lines[2].tag
+                )
+    ));
 
     let grep = core.registry().tool_by_name("grep").expect("grep tool");
     let output = grep

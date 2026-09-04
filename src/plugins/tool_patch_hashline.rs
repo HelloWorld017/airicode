@@ -24,18 +24,6 @@ use crate::{
     utils::{hashline, note::add_tool_note, schema::json_schema},
 };
 
-const PATCH_FORMAT: &str = r#"Expected format:
-REPLACE path FROM line:hash TO line:hash <<<TAG
-content
-TAG
-INSERT path BEFORE line:hash <<<TAG
-content
-TAG
-INSERT path AFTER line:hash <<<TAG
-content
-TAG
-DELETE path FROM line:hash TO line:hash"#;
-
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum PatchHashlineOperation {
@@ -82,21 +70,48 @@ impl BuildFileContextHook for HashlineFileContextHook {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OperationKind {
-    Delete,
-    Replace,
-    InsertBefore,
-    InsertAfter,
-}
+impl PatchHashlineOperation {
+    fn path(&self) -> &str {
+        match self {
+            Self::InsertBefore { path, .. }
+            | Self::InsertAfter { path, .. }
+            | Self::Replace { path, .. }
+            | Self::Delete { path, .. } => path,
+        }
+    }
 
-#[derive(Clone, Debug)]
-struct Operation {
-    kind: OperationKind,
-    path: String,
-    start: Option<hashline::Anchor>,
-    end: Option<hashline::Anchor>,
-    body: String,
+    fn content(&self) -> &str {
+        match self {
+            Self::InsertBefore { content, .. }
+            | Self::InsertAfter { content, .. }
+            | Self::Replace { content, .. } => content,
+            Self::Delete { .. } => "",
+        }
+    }
+
+    fn anchors(&self) -> std::result::Result<Vec<hashline::Anchor>, String> {
+        match self {
+            Self::InsertBefore { anchor, .. } | Self::InsertAfter { anchor, .. } => {
+                Ok(vec![parse_anchor(anchor)?])
+            }
+            Self::Replace {
+                anchor_start,
+                anchor_end,
+                ..
+            }
+            | Self::Delete {
+                anchor_start,
+                anchor_end,
+                ..
+            } => Ok(vec![parse_anchor(anchor_start)?, parse_anchor(anchor_end)?]),
+        }
+    }
+
+    fn validate(&self) -> std::result::Result<(), String> {
+        parse_path(self.path())?;
+        self.anchors()?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -114,7 +129,7 @@ struct FileSnapshot {
 }
 
 struct OperationOutcome {
-    operation: Operation,
+    operation: PatchHashlineOperation,
     edit: Option<LineEdit>,
     failure: Option<String>,
     applied: bool,
@@ -185,24 +200,21 @@ impl Tool for ToolPatchHashline {
                 return Ok(output);
             }
         };
-        let operation = match operation_to_domain(&input) {
-            Ok(operation) => operation,
-            Err(message) => {
-                let output = ToolOutput::Failure {
-                    content: syntax_error(&message),
-                };
-                add_tool_note(
-                    &context,
-                    NoteContent::Alert {
-                        content: format!("Patch failed: {}", message),
-                    },
-                    "patch_hashline",
-                )
-                .await?;
-                return Ok(output);
-            }
-        };
-        let operations = vec![operation];
+        if let Err(message) = input.validate() {
+            let output = ToolOutput::Failure {
+                content: syntax_error(&message),
+            };
+            add_tool_note(
+                &context,
+                NoteContent::Alert {
+                    content: format!("Patch failed: {message}"),
+                },
+                "patch_hashline",
+            )
+            .await?;
+            return Ok(output);
+        }
+        let operations = vec![input];
 
         // Read every path before resolving any anchor or writing any result.
         let snapshots = collect_snapshots(&operations, &context).await?;
@@ -234,7 +246,7 @@ impl Tool for ToolPatchHashline {
                 }
                 let reason = error.to_string();
                 for outcome in outcomes.iter_mut() {
-                    if outcome.operation.path == *path && outcome.failure.is_none() {
+                    if outcome.operation.path() == path && outcome.failure.is_none() {
                         outcome.failure =
                             Some(format!("could not write operation result: {reason}"));
                         outcome.final_range = None;
@@ -244,7 +256,7 @@ impl Tool for ToolPatchHashline {
                 continue;
             }
             for (index, outcome) in outcomes.iter_mut().enumerate() {
-                if outcome.operation.path == *path && outcome.failure.is_none() {
+                if outcome.operation.path() == path && outcome.failure.is_none() {
                     outcome.applied = true;
                     outcome.final_range = plan.output_ranges.get(&index).copied();
                 }
@@ -263,20 +275,12 @@ impl Tool for ToolPatchHashline {
                 operation_display(&outcome.operation)
             ));
             if outcome.applied {
-                if matches!(
-                    outcome.operation.kind,
-                    OperationKind::Delete
-                        | OperationKind::Replace
-                        | OperationKind::InsertBefore
-                        | OperationKind::InsertAfter
-                ) {
-                    if let Some(plan) = plans.get(&outcome.operation.path) {
-                        if let (Some(content), Some(range)) =
-                            (plan.content.as_deref(), outcome.final_range)
-                        {
-                            result.push_str("\nUpdated file:\n");
-                            result.push_str(&render_updated_region(content, range));
-                        }
+                if let Some(plan) = plans.get(outcome.operation.path()) {
+                    if let (Some(content), Some(range)) =
+                        (plan.content.as_deref(), outcome.final_range)
+                    {
+                        result.push_str("\nUpdated file:\n");
+                        result.push_str(&render_updated_region(content, range));
                     }
                 }
             } else {
@@ -286,12 +290,13 @@ impl Tool for ToolPatchHashline {
                     .unwrap_or("operation could not be applied");
                 result.push_str(&format!("\nReason: {reason}"));
                 if is_anchored(&outcome.operation) {
-                    if let Some(snapshot) = snapshots.get(&outcome.operation.path) {
-                        result.push_str("\nCurrent file:\n");
+                    if let Some(snapshot) = snapshots.get(outcome.operation.path()) {
                         if snapshot.content.is_some() {
+                            result.push_str("\nCurrent file:\n");
+                            let anchors = operation_anchors(&outcome.operation);
                             result.push_str(&surrounding_context(
                                 &snapshot.lines,
-                                operation_anchors(&outcome.operation),
+                                anchors.iter().collect(),
                             ));
                         } else if snapshot.exists {
                             result.push_str("(file contents are unavailable)");
@@ -305,9 +310,10 @@ impl Tool for ToolPatchHashline {
 
         let applied_plan_by_path = outcomes.iter().filter(|outcome| outcome.applied).fold(
             HashMap::new(),
-            |mut acc, outcome| match plans.get(&outcome.operation.path) {
+            |mut acc, outcome| match plans.get(outcome.operation.path()) {
                 Some(plan) => {
-                    acc.entry(outcome.operation.path.clone()).or_insert(plan);
+                    acc.entry(outcome.operation.path().to_string())
+                        .or_insert(plan);
                     acc
                 }
                 _ => acc,
@@ -341,7 +347,7 @@ impl Tool for ToolPatchHashline {
                         None => "",
                     };
 
-                    body.push_str(&outcome.operation.path);
+                    body.push_str(outcome.operation.path());
                     body.push_str(reason);
                     body.push('\n');
                     body
@@ -365,16 +371,16 @@ impl Tool for ToolPatchHashline {
 }
 
 fn syntax_error(message: &str) -> String {
-    format!("Patch syntax error: {message}\n\n{PATCH_FORMAT}")
+    format!("Patch syntax error: {message}")
 }
 
 async fn collect_snapshots(
-    operations: &[Operation],
+    operations: &[PatchHashlineOperation],
     context: &ToolContext,
 ) -> Result<HashMap<String, FileSnapshot>> {
     let paths = operations
         .iter()
-        .map(|operation| operation.path.clone())
+        .map(|operation| operation.path().to_string())
         .collect::<BTreeSet<_>>();
     let mut snapshots = HashMap::with_capacity(paths.len());
     for path in paths {
@@ -450,7 +456,7 @@ async fn snapshot_file(context: &ToolContext, path: &str) -> Result<FileSnapshot
 
 fn prepare_operation(
     _index: usize,
-    operation: Operation,
+    operation: PatchHashlineOperation,
     snapshots: &HashMap<String, FileSnapshot>,
     _max_bytes: usize,
 ) -> OperationOutcome {
@@ -462,19 +468,18 @@ fn prepare_operation(
         final_range: None,
     };
     let snapshot = snapshots
-        .get(&outcome.operation.path)
+        .get(outcome.operation.path())
         .expect("all operation paths have a snapshot");
     if let Some(error) = snapshot.error.as_deref() {
-        outcome.failure = Some(if is_anchored(&outcome.operation) {
-            format!("{error}; {}", unavailable_anchor_reason(&outcome.operation))
-        } else {
-            error.into()
-        });
+        outcome.failure = Some(format!(
+            "{error}; {}",
+            unavailable_anchor_reason(&outcome.operation)
+        ));
         return outcome;
     }
 
-    match outcome.operation.kind {
-        OperationKind::Delete | OperationKind::Replace => {
+    match &outcome.operation {
+        PatchHashlineOperation::Delete { .. } | PatchHashlineOperation::Replace { .. } => {
             let anchors = operation_anchors(&outcome.operation);
             if !snapshot.exists {
                 outcome.failure = Some(format!(
@@ -482,8 +487,8 @@ fn prepare_operation(
                     unavailable_anchor_reason(&outcome.operation)
                 ));
             } else {
-                let start = resolve_anchor(&snapshot.lines, anchors[0]);
-                let end = resolve_anchor(&snapshot.lines, anchors[1]);
+                let start = resolve_anchor(&snapshot.lines, &anchors[0]);
+                let end = resolve_anchor(&snapshot.lines, &anchors[1]);
                 let mut reasons = Vec::new();
                 if let Err(error) = &start {
                     reasons.push(anchor_reason(
@@ -492,13 +497,13 @@ fn prepare_operation(
                         } else {
                             "Start"
                         },
-                        anchors[0],
+                        &anchors[0],
                         error,
                     ));
                 }
                 if anchors[0] != anchors[1] {
                     if let Err(error) = &end {
-                        reasons.push(anchor_reason("End", anchors[1], error));
+                        reasons.push(anchor_reason("End", &anchors[1], error));
                     }
                 }
                 if !reasons.is_empty() {
@@ -512,10 +517,10 @@ fn prepare_operation(
                     } else {
                         let edit = line_edit(
                             snapshot.content.as_deref().unwrap_or_default(),
-                            outcome.operation.kind,
+                            &outcome.operation,
                             start,
                             end,
-                            &outcome.operation.body,
+                            outcome.operation.content(),
                         );
                         if edit.replacement
                             == source_slice(
@@ -526,7 +531,10 @@ fn prepare_operation(
                         {
                             outcome.failure = Some(format!(
                                 "{} does not change the file",
-                                if outcome.operation.kind == OperationKind::Delete {
+                                if matches!(
+                                    &outcome.operation,
+                                    PatchHashlineOperation::Delete { .. }
+                                ) {
                                     "DELETE"
                                 } else {
                                     "REPLACE"
@@ -539,7 +547,8 @@ fn prepare_operation(
                 }
             }
         }
-        OperationKind::InsertBefore | OperationKind::InsertAfter => {
+        PatchHashlineOperation::InsertBefore { .. }
+        | PatchHashlineOperation::InsertAfter { .. } => {
             let anchors = operation_anchors(&outcome.operation);
             if !snapshot.exists {
                 outcome.failure = Some(format!(
@@ -547,14 +556,14 @@ fn prepare_operation(
                     unavailable_anchor_reason(&outcome.operation)
                 ));
             } else {
-                match resolve_anchor(&snapshot.lines, anchors[0]) {
+                match resolve_anchor(&snapshot.lines, &anchors[0]) {
                     Ok(index) => {
                         let edit = line_edit(
                             snapshot.content.as_deref().unwrap_or_default(),
-                            outcome.operation.kind,
+                            &outcome.operation,
                             index,
                             index,
-                            &outcome.operation.body,
+                            outcome.operation.content(),
                         );
                         if edit.replacement.is_empty() {
                             outcome.failure = Some("INSERT does not change the file".into());
@@ -563,7 +572,7 @@ fn prepare_operation(
                         }
                     }
                     Err(error) => {
-                        outcome.failure = Some(anchor_reason("Anchor", anchors[0], &error));
+                        outcome.failure = Some(anchor_reason("Anchor", &anchors[0], &error));
                     }
                 }
             }
@@ -579,7 +588,7 @@ fn detect_conflicts(outcomes: &mut [OperationOutcome]) {
         }
         for previous in 0..current {
             if outcomes[previous].failure.is_some()
-                || outcomes[previous].operation.path != outcomes[current].operation.path
+                || outcomes[previous].operation.path() != outcomes[current].operation.path()
             {
                 continue;
             }
@@ -620,14 +629,14 @@ fn build_file_plans(
     let paths = outcomes
         .iter()
         .filter(|outcome| outcome.failure.is_none())
-        .map(|outcome| outcome.operation.path.clone())
+        .map(|outcome| outcome.operation.path().to_string())
         .collect::<BTreeSet<_>>();
     let mut plans = HashMap::new();
     for path in paths {
         let indexes = outcomes
             .iter()
             .enumerate()
-            .filter(|(_, outcome)| outcome.failure.is_none() && outcome.operation.path == path)
+            .filter(|(_, outcome)| outcome.failure.is_none() && outcome.operation.path() == path)
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
         let snapshot = snapshots
@@ -695,22 +704,29 @@ fn apply_edits(
     (result, ranges)
 }
 
-fn line_edit(source: &str, kind: OperationKind, start: usize, end: usize, body: &str) -> LineEdit {
+fn line_edit(
+    source: &str,
+    operation: &PatchHashlineOperation,
+    start: usize,
+    end: usize,
+    body: &str,
+) -> LineEdit {
     let lines = hashline::split_lines_preserving_endings(source);
     let offsets = line_offsets(&lines);
-    match kind {
-        OperationKind::Delete => LineEdit {
+    match operation {
+        PatchHashlineOperation::Delete { .. } => LineEdit {
             start: offsets[start].0,
             end: offsets[end].1,
             replacement: String::new(),
         },
-        OperationKind::Replace => LineEdit {
+        PatchHashlineOperation::Replace { .. } => LineEdit {
             start: offsets[start].0,
             end: offsets[end].1,
             replacement: normalized_replacement(&lines[end], body),
         },
-        OperationKind::InsertBefore | OperationKind::InsertAfter => {
-            let split = if kind == OperationKind::InsertBefore {
+        PatchHashlineOperation::InsertBefore { .. }
+        | PatchHashlineOperation::InsertAfter { .. } => {
+            let split = if matches!(operation, PatchHashlineOperation::InsertBefore { .. }) {
                 start
             } else {
                 start + 1
@@ -813,24 +829,18 @@ fn anchor_reason(label: &str, anchor: &hashline::Anchor, error: &AnchorError) ->
     }
 }
 
-fn operation_anchors(operation: &Operation) -> Vec<&hashline::Anchor> {
-    operation.start.iter().chain(operation.end.iter()).collect()
+fn operation_anchors(operation: &PatchHashlineOperation) -> Vec<hashline::Anchor> {
+    operation.anchors().expect("validated patch operation")
 }
 
-fn is_anchored(operation: &Operation) -> bool {
-    matches!(
-        operation.kind,
-        OperationKind::Delete
-            | OperationKind::Replace
-            | OperationKind::InsertBefore
-            | OperationKind::InsertAfter
-    )
+fn is_anchored(_operation: &PatchHashlineOperation) -> bool {
+    true
 }
 
-fn unavailable_anchor_reason(operation: &Operation) -> String {
+fn unavailable_anchor_reason(operation: &PatchHashlineOperation) -> String {
     let anchors = operation_anchors(operation);
     if anchors.len() == 1 {
-        return anchor_reason("Anchor", anchors[0], &AnchorError::Stale);
+        return anchor_reason("Anchor", &anchors[0], &AnchorError::Stale);
     }
     let mut reasons = Vec::new();
     reasons.push(anchor_reason(
@@ -839,11 +849,11 @@ fn unavailable_anchor_reason(operation: &Operation) -> String {
         } else {
             "Start"
         },
-        anchors[0],
+        &anchors[0],
         &AnchorError::Stale,
     ));
     if anchors[0] != anchors[1] {
-        reasons.push(anchor_reason("End", anchors[1], &AnchorError::Stale));
+        reasons.push(anchor_reason("End", &anchors[1], &AnchorError::Stale));
     }
     reasons.join(" ")
 }
@@ -948,87 +958,44 @@ fn patch_header(applied: usize, total: usize) -> String {
     }
 }
 
-fn operation_display(operation: &Operation) -> String {
-    match operation.kind {
-        OperationKind::Delete => format!(
+fn operation_display(operation: &PatchHashlineOperation) -> String {
+    match operation {
+        PatchHashlineOperation::Delete {
+            path,
+            anchor_start,
+            anchor_end,
+        } => format!(
             "DELETE {} FROM {} TO {}",
-            operation.path,
-            format_anchor(operation.start.as_ref().expect("DELETE start anchor")),
-            format_anchor(operation.end.as_ref().expect("DELETE end anchor")),
+            path,
+            format_anchor(&parse_anchor(anchor_start).expect("validated DELETE start anchor")),
+            format_anchor(&parse_anchor(anchor_end).expect("validated DELETE end anchor")),
         ),
-        OperationKind::Replace => format!(
+        PatchHashlineOperation::Replace {
+            path,
+            anchor_start,
+            anchor_end,
+            ..
+        } => format!(
             "REPLACE {} FROM {} TO {}",
-            operation.path,
-            format_anchor(operation.start.as_ref().expect("REPLACE start anchor")),
-            format_anchor(operation.end.as_ref().expect("REPLACE end anchor")),
+            path,
+            format_anchor(&parse_anchor(anchor_start).expect("validated REPLACE start anchor")),
+            format_anchor(&parse_anchor(anchor_end).expect("validated REPLACE end anchor")),
         ),
-        OperationKind::InsertBefore => format!(
+        PatchHashlineOperation::InsertBefore { path, anchor, .. } => format!(
             "INSERT {} BEFORE {}",
-            operation.path,
-            format_anchor(operation.start.as_ref().expect("INSERT anchor")),
+            path,
+            format_anchor(&parse_anchor(anchor).expect("validated INSERT anchor")),
         ),
-        OperationKind::InsertAfter => format!(
+        PatchHashlineOperation::InsertAfter { path, anchor, .. } => format!(
             "INSERT {} AFTER {}",
-            operation.path,
-            format_anchor(operation.start.as_ref().expect("INSERT anchor")),
+            path,
+            format_anchor(&parse_anchor(anchor).expect("validated INSERT anchor")),
         ),
     }
 }
 
 fn format_anchor(anchor: &hashline::Anchor) -> String {
     format!("{}:{}", anchor.line, anchor.tag)
-}
-
-fn operation_to_domain(
-    operation: &PatchHashlineOperation,
-) -> std::result::Result<Operation, String> {
-    match operation {
-        PatchHashlineOperation::InsertBefore {
-            path,
-            anchor,
-            content,
-        } => Ok(Operation {
-            kind: OperationKind::InsertBefore,
-            path: parse_path(path)?,
-            start: Some(parse_anchor(anchor)?),
-            end: None,
-            body: content.clone(),
-        }),
-        PatchHashlineOperation::InsertAfter {
-            path,
-            anchor,
-            content,
-        } => Ok(Operation {
-            kind: OperationKind::InsertAfter,
-            path: parse_path(path)?,
-            start: Some(parse_anchor(anchor)?),
-            end: None,
-            body: content.clone(),
-        }),
-        PatchHashlineOperation::Replace {
-            path,
-            anchor_start,
-            anchor_end,
-            content,
-        } => Ok(Operation {
-            kind: OperationKind::Replace,
-            path: parse_path(path)?,
-            start: Some(parse_anchor(anchor_start)?),
-            end: Some(parse_anchor(anchor_end)?),
-            body: content.clone(),
-        }),
-        PatchHashlineOperation::Delete {
-            path,
-            anchor_start,
-            anchor_end,
-        } => Ok(Operation {
-            kind: OperationKind::Delete,
-            path: parse_path(path)?,
-            start: Some(parse_anchor(anchor_start)?),
-            end: Some(parse_anchor(anchor_end)?),
-            body: String::new(),
-        }),
-    }
 }
 
 fn parse_path(value: &str) -> std::result::Result<String, String> {

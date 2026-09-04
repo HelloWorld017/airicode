@@ -91,7 +91,7 @@ async fn main() -> airicode::Result<()> {
     TerminalApp::new(
         session,
         provider_id,
-        std::env::var("AIRICODE_MODEL").unwrap_or_else(|_| "minimax-m3".into()),
+        std::env::var("AIRICODE_MODEL").unwrap_or_else(|_| "gpt-5.6-luna".into()),
     )
     .run()
     .await

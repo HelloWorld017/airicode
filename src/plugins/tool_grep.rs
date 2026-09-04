@@ -34,7 +34,6 @@ pub struct ToolGrep {
     id: ToolId,
     max_output_bytes: usize,
     max_results: usize,
-    enable_hashline: bool,
 }
 
 impl ToolGrep {
@@ -43,17 +42,12 @@ impl ToolGrep {
             id: ToolId::new(),
             max_output_bytes: 128 * 1024,
             max_results: 500,
-            enable_hashline: false,
         }
     }
 
     pub fn with_limits(mut self, max_results: usize, max_output_bytes: usize) -> Self {
         self.max_results = max_results;
         self.max_output_bytes = max_output_bytes;
-        self
-    }
-    pub fn with_hashline(mut self, enable_hashline: bool) -> Self {
-        self.enable_hashline = enable_hashline;
         self
     }
 }
@@ -72,11 +66,7 @@ impl Tool for ToolGrep {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "grep".into(),
-            description: if self.enable_hashline {
-                "Search files visible through the current workdir using a regular-expression pattern. `path` optionally limits the search scope and `glob` optionally filters filenames. Results use `path:line:hash|content`, where the hashline anchor is compatible with patch_hashline, and are size-limited."
-            } else {
-                "Search files visible through the current workdir using a regular-expression pattern. `path` optionally limits the search scope and `glob` optionally filters filenames. Results use `path:line|content` and are size-limited."
-            }
+            description: "Search files visible through the current workdir using a regular-expression pattern. `path` optionally limits the search scope and `glob` optionally filters filenames. Results use `<path>:<line anchor>|<content>` and are size-limited."
             .into(),
             input: ToolInputDefinition::new(json_schema::<GrepInput>()),
         }
@@ -318,7 +308,7 @@ impl ConfigReadHook for ToolGrepPlugin {
         context
             .registry
             .register_tool(
-                Arc::new(ToolGrep::new().with_hashline(context.config.tool.enable_hashline)),
+                Arc::new(ToolGrep::new()),
                 0,
             )
             .map(|_| ())

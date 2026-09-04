@@ -7,3 +7,4 @@
 - [ ] per-model config
 - [ ] js plugin
 - [ ] command / shell action schema 수정 (name, description, nargs)
+- [ ] message history

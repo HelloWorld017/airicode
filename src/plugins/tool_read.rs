@@ -25,16 +25,15 @@ use crate::{
 struct ReadInput {
     path: String,
     #[schemars(range(min = 1))]
-    start_line: Option<usize>,
+    line_start: Option<usize>,
     #[schemars(range(min = 1))]
-    end_line: Option<usize>,
+    line_end: Option<usize>,
 }
 
 pub struct ToolRead {
     id: ToolId,
     max_lines: usize,
     max_bytes: usize,
-    enable_hashline: bool,
 }
 
 impl ToolRead {
@@ -43,16 +42,11 @@ impl ToolRead {
             id: ToolId::new(),
             max_lines: 2_000,
             max_bytes: 256 * 1024,
-            enable_hashline: false,
         }
     }
     pub fn with_limits(mut self, max_lines: usize, max_bytes: usize) -> Self {
         self.max_lines = max_lines;
         self.max_bytes = max_bytes;
-        self
-    }
-    pub fn with_hashline(mut self, enable_hashline: bool) -> Self {
-        self.enable_hashline = enable_hashline;
         self
     }
 }
@@ -71,11 +65,8 @@ impl Tool for ToolRead {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "read".into(),
-            description: if self.enable_hashline {
-                "Read a UTF-8 text file from the current workdir and return hashline-annotated lines in the form `<line>:<3-character-hash>|<content>`. Copy only the `<line>:<hash>` prefix into a patch_hashline anchor. `start_line` and `end_line` are optional inclusive line limits. Binary/NUL-containing files and requests beyond the configured size or line limits fail."
-            } else {
-                "Read a UTF-8 text file from the current workdir and return numbered lines in the form `<line>|<content>`. `start_line` and `end_line` are optional inclusive line limits. Binary/NUL-containing files and requests beyond the configured size or line limits fail."
-            }.into(),
+            description:
+                "Read a UTF-8 text file from the current workdir and return numbered lines in the form `<line anchor>|<content>`. `line_start` and `line_end` are optional inclusive line limits; reversed limits are normalized. Binary/NUL-containing files and requests beyond the configured size or line limits fail.".into(),
             input: ToolInputDefinition::new(json_schema::<ReadInput>()),
         }
     }
@@ -88,12 +79,16 @@ impl Tool for ToolRead {
         if context.cancellation.is_cancelled() {
             return Err(Error::Cancelled);
         }
+        let (line_start, line_end) = match (input.line_start, input.line_end) {
+            (Some(start), Some(end)) if start > end => (Some(end), Some(start)),
+            range => range,
+        };
         let file_context = match context
             .operations
             .build_file_context(crate::core::models::BuildFileContextRequest {
                 path: PathBuf::from(&input.path),
-                start_line: input.start_line,
-                end_line: input.end_line,
+                start_line: line_start,
+                end_line: line_end,
                 max_lines: Some(self.max_lines),
                 max_bytes: Some(self.max_bytes),
             })
@@ -131,9 +126,9 @@ impl Tool for ToolRead {
             .map(|line| format!("{}|{}", line.display_prefix, line.text))
             .collect::<Vec<_>>()
             .join("\n");
-        let range = if let Some(end) = input.end_line {
-            format!(":{}-{end}", input.start_line.unwrap_or(1))
-        } else if let Some(start) = input.start_line {
+        let range = if let Some(end) = line_end {
+            format!(":{}-{end}", line_start.unwrap_or(1))
+        } else if let Some(start) = line_start {
             format!(":{start}-")
         } else {
             String::new()
@@ -181,7 +176,7 @@ impl ConfigReadHook for ToolReadPlugin {
         context
             .registry
             .register_tool(
-                Arc::new(ToolRead::new().with_hashline(context.config.tool.enable_hashline)),
+                Arc::new(ToolRead::new()),
                 0,
             )
             .map(|_| ())
