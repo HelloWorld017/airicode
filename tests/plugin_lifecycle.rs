@@ -4,8 +4,8 @@ use airicode::{
     Result,
     core::{CoreBuilder, project_from_path},
     plugins::{
-        OpenAiProviderPlugin, PersistencePlugin, ToolGrepPlugin, ToolPatchHashlinePlugin,
-        ToolPatchPlugin, ToolReadPlugin,
+        ActionConfigPlugin, OpenAiProviderPlugin, PersistencePlugin, ToolGrepPlugin,
+        ToolPatchHashlinePlugin, ToolPatchPlugin, ToolReadPlugin,
     },
 };
 use serde_json::json;
@@ -77,5 +77,20 @@ async fn hashline_config_selects_hashline_tools() -> Result<()> {
     assert!(names.contains(&"grep".into()));
     assert!(names.contains(&"patch_hashline".into()));
     assert!(!names.contains(&"patch".into()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn config_action_is_registered_from_config_read() -> Result<()> {
+    let core = CoreBuilder::new()
+        .plugin(Arc::new(ActionConfigPlugin::new()))
+        .build()
+        .await?;
+
+    let action = core
+        .registry()
+        .shell_action_by_name("config")
+        .expect("config action should be registered");
+    assert_eq!(action.definition().name, "config");
     Ok(())
 }

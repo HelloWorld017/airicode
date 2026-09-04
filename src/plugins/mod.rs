@@ -1,3 +1,4 @@
+pub mod action_config;
 pub mod instruction_base;
 pub mod persistence;
 pub mod provider_openai;
@@ -18,6 +19,7 @@ pub mod tool_todo;
 pub mod tool_webfetch;
 pub mod tool_write;
 
+pub use action_config::{ActionConfig, ActionConfigPlugin};
 pub use instruction_base::{DEFAULT_BASE_INSTRUCTION, InstructionBasePlugin};
 pub use persistence::{
     JsonlSessionStore, JsonlStore, PersistencePlugin, SessionLogRecord, default_data_root,

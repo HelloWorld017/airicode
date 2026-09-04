@@ -263,6 +263,7 @@ async fn registry_registers_and_dispatches_shell_actions() -> airicode::Result<(
             ["inspect", "one", "two"],
             ShellActionContext {
                 project_id: airicode::core::models::ProjectId::from_workdir(directory.path()),
+                project_root: directory.path().to_path_buf(),
                 workdir: Arc::new(airicode::core::workdir::NativeWorkdir::new(PathBuf::from(
                     directory.path(),
                 ))?),

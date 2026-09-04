@@ -53,13 +53,23 @@ impl CoreBuilder {
             schemas.push((plugin.name().to_string(), plugin.config_schema()));
             plugin.clone().init(scope).await?;
         }
-        let config = aggregate(self.raw_config, &schemas)?;
+        let (config, mut startup_diagnostics) = match aggregate(self.raw_config, &schemas) {
+            Ok(config) => (config, Vec::new()),
+            Err(error) => (
+                aggregate(Value::Object(Default::default()), &schemas)?,
+                vec![format!("configuration is invalid; using defaults: {error}")],
+            ),
+        };
         for (hook, registry_scope) in registry.config_read_hooks() {
-            hook.config_read(ConfigReadContext {
-                config: config.clone(),
-                registry: registry_scope,
-            })
-            .await?;
+            if let Err(error) = hook
+                .config_read(ConfigReadContext {
+                    config: config.clone(),
+                    registry: registry_scope,
+                })
+                .await
+            {
+                startup_diagnostics.push(format!("configuration initialization failed: {error}"));
+            }
         }
         if let Some(project) = self.project.clone() {
             for (hook, registry_scope) in registry.open_project_hooks() {
@@ -77,6 +87,7 @@ impl CoreBuilder {
                 config,
                 project: self.project,
                 ui_events,
+                startup_diagnostics,
             }),
         })
     }
@@ -92,6 +103,7 @@ struct CoreInner {
     config: Config,
     project: Option<Project>,
     ui_events: broadcast::Sender<UIEvent>,
+    startup_diagnostics: Vec<String>,
 }
 
 impl Default for Core {
@@ -109,6 +121,7 @@ impl Core {
                 config: Config::default(),
                 project: None,
                 ui_events,
+                startup_diagnostics: Vec::new(),
             }),
         }
     }
@@ -134,6 +147,10 @@ impl Core {
 
     pub fn subscribe_ui_events(&self) -> broadcast::Receiver<UIEvent> {
         self.inner.ui_events.subscribe()
+    }
+
+    pub fn startup_diagnostics(&self) -> &[String] {
+        &self.inner.startup_diagnostics
     }
 
     pub(crate) fn emit_ui_event(&self, event: UIEvent) -> Result<()> {

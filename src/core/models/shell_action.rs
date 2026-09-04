@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -74,6 +74,7 @@ impl ShellActionInvocation {
 #[derive(Clone)]
 pub struct ShellActionContext {
     pub project_id: ProjectId,
+    pub project_root: PathBuf,
     pub workdir: Arc<dyn Workdir>,
     pub cancellation: CancellationToken,
 }
