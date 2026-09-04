@@ -12,7 +12,6 @@ use super::error::{Error, Result};
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ToolConfig {
     pub enable_hashline: bool,
-    pub freeform: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -167,10 +166,6 @@ pub fn aggregate(raw: Value, schemas: &[(String, Value)]) -> Result<Config> {
             .get("enable_hashline")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        freeform: tool_value
-            .get("freeform")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
     };
     let plugins = root
         .get("plugins")
@@ -235,8 +230,7 @@ fn tool_schema() -> Value {
     serde_json::json!({
         "type": "object",
         "properties": {
-            "enable_hashline": { "type": "boolean" },
-            "freeform": { "type": "boolean" }
+            "enable_hashline": { "type": "boolean" }
         }
     })
 }
@@ -282,7 +276,7 @@ mod tests {
         let project = directory.path().join("project/.airicode/airicode.json");
         tokio::fs::write(
             &global,
-            r#"{"tool":{"freeform":false,"enable_hashline":true},"plugins":{"test":{"value":"global"}}}"#,
+            r#"{"tool":{"enable_hashline":true},"plugins":{"test":{"value":"global"}}}"#,
         )
         .await
         .expect("write global configuration");
@@ -291,7 +285,7 @@ mod tests {
             .expect("create project configuration directory");
         tokio::fs::write(
             &project,
-            r#"{"$schema":"http://obsolete.test/schema.json","tool":{"freeform":true},"plugins":{"test":{"other":"project"}}}"#,
+            r#"{"$schema":"http://obsolete.test/schema.json","plugins":{"test":{"other":"project"}}}"#,
         )
         .await
         .expect("write project configuration");
@@ -306,7 +300,7 @@ mod tests {
         assert_eq!(
             loaded.raw,
             serde_json::json!({
-                "tool": { "freeform": true, "enable_hashline": true },
+                "tool": { "enable_hashline": true },
                 "plugins": { "test": { "value": "global", "other": "project" } }
             })
         );

@@ -26,7 +26,6 @@ pub struct OpenAiProvider {
     id: ProviderId,
     api_key: Arc<RwLock<String>>,
     base_url: Arc<RwLock<String>>,
-    freeform: bool,
     client: Client,
 }
 
@@ -36,7 +35,6 @@ impl OpenAiProvider {
             id,
             api_key: Arc::new(RwLock::new(api_key.into())),
             base_url: Arc::new(RwLock::new("https://openrouter.ai/api/v1".into())),
-            freeform: false,
             client: Client::new(),
         }
     }
@@ -53,11 +51,6 @@ impl OpenAiProvider {
 
     pub fn with_client(mut self, client: Client) -> Self {
         self.client = client;
-        self
-    }
-
-    pub fn with_freeform(mut self, freeform: bool) -> Self {
-        self.freeform = freeform;
         self
     }
 
@@ -132,7 +125,7 @@ impl Provider for OpenAiProvider {
 
     async fn request(&self, request: ProviderRequest) -> Result<ProviderStream> {
         let provider_id = self.id;
-        let body = responses_body(&request, provider_id, self.freeform);
+        let body = responses_body(&request, provider_id);
         let response = self
             .client
             .post(self.endpoint("/responses"))
@@ -181,13 +174,7 @@ impl Provider for OpenAiProvider {
                     let event = serde_json::from_str::<Value>(data).map_err(|error| {
                         Error::Provider(format!("invalid OpenAI Responses event: {error}"))
                     })?;
-                    for event in response_events_with_tools(
-                        event,
-                        provider_id,
-                        &request.tools,
-                        &mut output_items,
-                        &mut saw_tool_call,
-                    )? {
+                    for event in response_events(event, provider_id, &mut output_items, &mut saw_tool_call)? {
                         yield event;
                     }
                 }
@@ -197,11 +184,11 @@ impl Provider for OpenAiProvider {
     }
 }
 
-fn responses_body(request: &ProviderRequest, provider_id: ProviderId, freeform: bool) -> Value {
+fn responses_body(request: &ProviderRequest, provider_id: ProviderId) -> Value {
     json!({
         "model": request.model,
-        "input": responses_input(&request.messages, provider_id, &request.tools, freeform),
-        "tools": request.tools.iter().map(|tool| responses_tool(tool, freeform)).collect::<Vec<_>>(),
+        "input": responses_input(&request.messages, provider_id),
+        "tools": request.tools.iter().map(responses_tool).collect::<Vec<_>>(),
         "stream": true,
         "store": false,
         "include": ["reasoning.encrypted_content"],
@@ -209,33 +196,16 @@ fn responses_body(request: &ProviderRequest, provider_id: ProviderId, freeform: 
     })
 }
 
-fn uses_freeform(tool: &ToolDefinition, freeform: bool) -> bool {
-    freeform && tool.input.freeform.is_some()
+fn responses_tool(tool: &ToolDefinition) -> Value {
+    json!({
+        "type": "function",
+        "name": tool.name,
+        "description": tool.description,
+        "parameters": tool.input.schema,
+    })
 }
 
-fn responses_tool(tool: &ToolDefinition, freeform: bool) -> Value {
-    if uses_freeform(tool, freeform) {
-        json!({
-            "type": "custom",
-            "name": tool.name,
-            "description": tool.input.freeform.as_ref().expect("freeform tool").description,
-        })
-    } else {
-        json!({
-            "type": "function",
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": tool.input.schema,
-        })
-    }
-}
-
-fn responses_input(
-    messages: &[Arc<Message>],
-    provider_id: ProviderId,
-    tools: &[ToolDefinition],
-    freeform: bool,
-) -> Vec<Value> {
+fn responses_input(messages: &[Arc<Message>], provider_id: ProviderId) -> Vec<Value> {
     let mut input = Vec::new();
     for message in messages {
         for part in &message.content {
@@ -260,24 +230,12 @@ fn responses_input(
                     name,
                     arguments,
                 } => {
-                    let text_input = tools
-                        .iter()
-                        .any(|tool| tool.name == *name && uses_freeform(tool, freeform));
-                    if text_input {
-                        input.push(json!({
-                            "type": "custom_tool_call",
-                            "call_id": id.to_string(),
-                            "name": name,
-                            "input": response_text_input(arguments),
-                        }));
-                    } else {
-                        input.push(json!({
-                            "type": "function_call",
-                            "call_id": id.to_string(),
-                            "name": name,
-                            "arguments": response_function_arguments(arguments),
-                        }));
-                    }
+                    input.push(json!({
+                        "type": "function_call",
+                        "call_id": id.to_string(),
+                        "name": name,
+                        "arguments": response_function_arguments(arguments),
+                    }));
                 }
                 MessagePartContent::ToolResult {
                     call_id, result, ..
@@ -302,31 +260,13 @@ fn response_role(role: Role) -> &'static str {
     }
 }
 
-fn response_text_input(arguments: &Value) -> String {
-    match arguments {
-        Value::String(arguments) => arguments.clone(),
-        arguments => arguments.to_string(),
-    }
-}
-
 fn response_function_arguments(arguments: &Value) -> String {
     serde_json::to_string(arguments).unwrap_or_else(|_| arguments.to_string())
 }
 
-#[cfg(test)]
 fn response_events(
     event: Value,
     provider_id: ProviderId,
-    output_items: &mut BTreeMap<u32, Value>,
-    saw_tool_call: &mut bool,
-) -> Result<Vec<ProviderEvent>> {
-    response_events_with_tools(event, provider_id, &[], output_items, saw_tool_call)
-}
-
-fn response_events_with_tools(
-    event: Value,
-    provider_id: ProviderId,
-    tools: &[ToolDefinition],
     output_items: &mut BTreeMap<u32, Value>,
     saw_tool_call: &mut bool,
 ) -> Result<Vec<ProviderEvent>> {
@@ -344,7 +284,7 @@ fn response_events_with_tools(
                 .ok_or_else(|| Error::Provider("output item event has no item".into()))?;
             *saw_tool_call |= matches!(
                 item.get("type").and_then(Value::as_str),
-                Some("function_call") | Some("custom_tool_call")
+                Some("function_call")
             );
             output_items.insert(index, item);
         }
@@ -356,12 +296,12 @@ fn response_events_with_tools(
                 .ok_or_else(|| Error::Provider("output item event has no item".into()))?;
             *saw_tool_call |= matches!(
                 item.get("type").and_then(Value::as_str),
-                Some("function_call") | Some("custom_tool_call")
+                Some("function_call")
             );
             output_items.insert(index, item.clone());
             result.push(ProviderEvent::OutputPart {
                 index,
-                part: output_item_part(provider_id, item, tools)?,
+                part: output_item_part(provider_id, item)?,
             });
         }
         "response.output_text.delta" => {
@@ -391,30 +331,6 @@ fn response_events_with_tools(
                     .map(str::to_owned),
                 arguments: required_string(&event, "delta")?,
             });
-        }
-        "response.custom_tool_call_input.delta" => {
-            let index = required_u32(&event, "output_index")?;
-            let item = output_items.get(&index);
-            result.push(ProviderEvent::CustomToolCallInputDelta {
-                index,
-                id: item
-                    .and_then(|item| item.get("call_id"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                name: item
-                    .and_then(|item| item.get("name"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                input: required_string(&event, "delta")?,
-            });
-        }
-        "response.custom_tool_call_input.done" => {
-            let index = required_u32(&event, "output_index")?;
-            let input = required_string(&event, "input")?;
-            if let Some(item) = output_items.get_mut(&index) {
-                item["input"] = Value::String(input.clone());
-            }
-            result.push(ProviderEvent::CustomToolCallInputDone { index, input });
         }
         "response.completed" => {
             append_usage(&mut result, event.get("response"))?;
@@ -467,11 +383,7 @@ fn response_events_with_tools(
     Ok(result)
 }
 
-fn output_item_part(
-    provider_id: ProviderId,
-    item: Value,
-    tools: &[ToolDefinition],
-) -> Result<MessagePart> {
+fn output_item_part(provider_id: ProviderId, item: Value) -> Result<MessagePart> {
     Ok(match item.get("type").and_then(Value::as_str) {
         Some("message") => {
             let text = item
@@ -521,29 +433,6 @@ fn output_item_part(
                         .unwrap_or_else(|_| Value::String(arguments.to_string()))
                 })
                 .unwrap_or(Value::Null);
-            MessagePart::tool_call(
-                ToolCallId::from_external(call_id),
-                name.to_string(),
-                arguments,
-            )
-            .with_provider_data(provider_id, item)
-        }
-        Some("custom_tool_call") => {
-            let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
-                return Ok(MessagePart::provider_only(provider_id, item));
-            };
-            let Some(name) = item.get("name").and_then(Value::as_str) else {
-                return Ok(MessagePart::provider_only(provider_id, item));
-            };
-            let Some(input) = item.get("input").and_then(Value::as_str) else {
-                return Ok(MessagePart::provider_only(provider_id, item));
-            };
-            let arguments = match tools.iter().find(|tool| tool.name == name) {
-                Some(tool) => tool.input.parse_freeform(input).map_err(|error| {
-                    Error::Provider(format!("invalid freeform input for {name}: {error}"))
-                })?,
-                None => Value::String(input.to_string()),
-            };
             MessagePart::tool_call(
                 ToolCallId::from_external(call_id),
                 name.to_string(),
@@ -685,9 +574,7 @@ impl ConfigReadHook for OpenAiProviderPlugin {
             .unwrap_or("OPENAI_API_KEY");
         let key =
             std::env::var(key_env).map_err(|_| Error::Config(format!("{key_env} is not set")))?;
-        let provider = Arc::new(
-            OpenAiProvider::new(self.provider_id, key).with_freeform(context.config.tool.freeform),
-        );
+        let provider = Arc::new(OpenAiProvider::new(self.provider_id, key));
         if let Some(base_url) = config.get("base_url").and_then(Value::as_str) {
             provider.set_base_url(base_url.to_string());
         }
@@ -710,11 +597,6 @@ mod tests {
     use super::*;
     use crate::Result;
     use crate::core::models::{ToolDefinition, ToolInputDefinition, ToolOutput};
-    use crate::plugins::{
-        tool_patch_apply_patch::parse_apply_patch_freeform,
-        tool_patch_hashline::parse_patch_hashline_freeform, tool_shell::parse_shell_freeform,
-        tool_write::parse_write_freeform,
-    };
     use tokio_util::sync::CancellationToken;
 
     #[test]
@@ -756,8 +638,6 @@ mod tests {
                 Arc::new(result),
             ],
             provider_id,
-            &[],
-            false,
         );
 
         assert_eq!(input[0], native);
@@ -781,7 +661,7 @@ mod tests {
             }],
             cancellation: CancellationToken::new(),
         };
-        let body = responses_body(&request, ProviderId::new(), false);
+        let body = responses_body(&request, ProviderId::new());
         assert_eq!(body["stream"], true);
         assert_eq!(body["store"], false);
         assert_eq!(body["include"][0], "reasoning.encrypted_content");
@@ -792,13 +672,12 @@ mod tests {
     }
 
     #[test]
-    fn responses_body_uses_custom_tools_only_when_freeform_is_enabled() {
+    fn responses_body_uses_function_tools() {
         let tools = vec![
             ToolDefinition {
                 name: "shell".into(),
                 description: "run a command".into(),
-                input: ToolInputDefinition::new(serde_json::json!({ "type": "object" }))
-                    .with_freeform("run a raw command", parse_shell_freeform),
+                input: ToolInputDefinition::new(serde_json::json!({ "type": "object" })),
             },
             ToolDefinition {
                 name: "write".into(),
@@ -806,24 +685,11 @@ mod tests {
                 input: ToolInputDefinition::new(serde_json::json!({
                     "type": "object",
                     "properties": { "path": { "type": "string" } }
-                }))
-                .with_freeform("write raw file contents", parse_write_freeform),
+                })),
             },
             ToolDefinition {
                 name: "apply_patch".into(),
                 description: "apply a patch".into(),
-                input: ToolInputDefinition::new(serde_json::json!({ "type": "object" }))
-                    .with_freeform("apply a raw patch", parse_apply_patch_freeform),
-            },
-            ToolDefinition {
-                name: "patch_hashline".into(),
-                description: "apply a hashline patch".into(),
-                input: ToolInputDefinition::new(serde_json::json!({ "type": "object" }))
-                    .with_freeform("apply a raw hashline patch", parse_patch_hashline_freeform),
-            },
-            ToolDefinition {
-                name: "patch".into(),
-                description: "apply replacements".into(),
                 input: ToolInputDefinition::new(serde_json::json!({ "type": "object" })),
             },
         ];
@@ -833,46 +699,28 @@ mod tests {
             tools,
             cancellation: CancellationToken::new(),
         };
-        let json_body = responses_body(&request, ProviderId::new(), false);
-        for tool in json_body["tools"].as_array().unwrap() {
+        let body = responses_body(&request, ProviderId::new());
+        for tool in body["tools"].as_array().unwrap() {
             assert_eq!(tool["type"], "function");
             assert_eq!(tool["parameters"]["type"], "object");
         }
-
-        let freeform_body = responses_body(&request, ProviderId::new(), true);
-        for tool in &freeform_body["tools"].as_array().unwrap()[..4] {
-            assert_eq!(tool["type"], "custom");
-            assert!(tool.get("parameters").is_none());
-        }
-        assert_eq!(json_body["tools"][0]["description"], "run a command");
-        assert_eq!(
-            freeform_body["tools"][0]["description"],
-            "run a raw command"
-        );
-        assert_eq!(freeform_body["tools"][4]["type"], "function");
+        assert_eq!(body["tools"][0]["description"], "run a command");
     }
 
     #[test]
-    fn responses_input_replays_text_tool_calls_as_custom_items() {
-        let shell = ToolDefinition {
-            name: "shell".into(),
-            description: "run a command".into(),
-            input: ToolInputDefinition::new(serde_json::json!({ "type": "object" }))
-                .with_freeform("run a raw command", parse_shell_freeform),
-        };
+    fn responses_input_replays_tool_calls_as_function_items() {
         let message = Message {
             content: vec![MessagePart::tool_call(
                 ToolCallId::from_external("call_shell"),
                 "shell".into(),
-                Value::String("printf hello".into()),
+                serde_json::json!({ "command": "printf hello" }),
             )],
             ..Message::text(Role::Assistant, "", "build", None)
         };
-        let input = responses_input(&[Arc::new(message)], ProviderId::new(), &[shell], true);
-        assert_eq!(input[0]["type"], "custom_tool_call");
+        let input = responses_input(&[Arc::new(message)], ProviderId::new());
+        assert_eq!(input[0]["type"], "function_call");
         assert_eq!(input[0]["name"], "shell");
-        assert_eq!(input[0]["input"], "printf hello");
-        assert!(input[0].get("arguments").is_none());
+        assert_eq!(input[0]["arguments"], r#"{"command":"printf hello"}"#);
     }
 
     #[test]
@@ -939,7 +787,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_tool_streaming_events_accumulate_raw_input() -> Result<()> {
+    fn function_tool_streaming_events_accumulate_json_arguments() -> Result<()> {
         let provider_id = ProviderId::new();
         let mut output_items = BTreeMap::new();
         let mut saw_tool_call = false;
@@ -948,11 +796,11 @@ mod tests {
                 "type": "response.output_item.added",
                 "output_index": 0,
                 "item": {
-                    "type": "custom_tool_call",
-                    "id": "ctc_1",
+                    "type": "function_call",
+                    "id": "fc_1",
                     "call_id": "call_shell",
                     "name": "shell",
-                    "input": ""
+                    "arguments": ""
                 }
             }),
             provider_id,
@@ -961,9 +809,9 @@ mod tests {
         )?;
         let delta = response_events(
             serde_json::json!({
-                "type": "response.custom_tool_call_input.delta",
+                "type": "response.function_call_arguments.delta",
                 "output_index": 0,
-                "delta": "printf "
+                "delta": "{\"command\":\"printf hello\"}"
             }),
             provider_id,
             &mut output_items,
@@ -971,96 +819,14 @@ mod tests {
         )?;
         assert!(matches!(
             delta.as_slice(),
-            [ProviderEvent::CustomToolCallInputDelta {
+            [ProviderEvent::ToolCallDelta {
                 id: Some(id),
                 name: Some(name),
-                input,
+                arguments,
                 ..
-            }] if id == "call_shell" && name == "shell" && input == "printf "
-        ));
-        let done = response_events(
-            serde_json::json!({
-                "type": "response.custom_tool_call_input.done",
-                "output_index": 0,
-                "input": "printf hello"
-            }),
-            provider_id,
-            &mut output_items,
-            &mut saw_tool_call,
-        )?;
-        assert!(matches!(
-            done.as_slice(),
-            [ProviderEvent::CustomToolCallInputDone { index: 0, input }] if input == "printf hello"
-        ));
-        let final_events = response_events(
-            serde_json::json!({
-                "type": "response.output_item.done",
-                "output_index": 0,
-                "item": {
-                    "type": "custom_tool_call",
-                    "id": "ctc_1",
-                    "call_id": "call_shell",
-                    "name": "shell",
-                    "input": "printf hello"
-                }
-            }),
-            provider_id,
-            &mut output_items,
-            &mut saw_tool_call,
-        )?;
-        let ProviderEvent::OutputPart { part, .. } = &final_events[0] else {
-            panic!("expected finalized custom tool part")
-        };
-        assert!(matches!(
-            part.content.as_ref(),
-            Some(MessagePartContent::ToolCall { id, name, arguments })
-                if id.to_string() == "call_shell"
-                    && name == "shell"
-                    && arguments == &Value::String("printf hello".into())
+            }] if id == "call_shell" && name == "shell" && arguments == "{\"command\":\"printf hello\"}"
         ));
         assert!(saw_tool_call);
-        Ok(())
-    }
-
-    #[test]
-    fn custom_tool_calls_store_parsed_canonical_arguments() -> Result<()> {
-        let provider_id = ProviderId::new();
-        let shell = ToolDefinition {
-            name: "shell".into(),
-            description: "run a command".into(),
-            input: ToolInputDefinition::new(serde_json::json!({ "type": "object" }))
-                .with_freeform("run a raw command", parse_shell_freeform),
-        };
-        let mut output_items = BTreeMap::new();
-        let mut saw_tool_call = false;
-        let events = response_events_with_tools(
-            serde_json::json!({
-                "type": "response.output_item.done",
-                "output_index": 0,
-                "item": {
-                    "type": "custom_tool_call",
-                    "call_id": "call_shell",
-                    "name": "shell",
-                    "input": "printf hello"
-                }
-            }),
-            provider_id,
-            &[shell],
-            &mut output_items,
-            &mut saw_tool_call,
-        )?;
-        let ProviderEvent::OutputPart { part, .. } = &events[0] else {
-            panic!("expected finalized custom tool part")
-        };
-        assert!(matches!(
-            part.content.as_ref(),
-            Some(MessagePartContent::ToolCall { arguments, .. })
-                if arguments == &serde_json::json!({ "command": "printf hello" })
-        ));
-        assert_eq!(
-            part.provider_data.as_ref().unwrap().data["input"],
-            "printf hello"
-        );
         Ok(())
     }
 

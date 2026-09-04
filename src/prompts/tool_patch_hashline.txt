@@ -1,13 +1,13 @@
 Apply anchored edits to UTF-8 files in the current workdir.
 
-Pass an object with a non-empty `operations` array. Every operation has a
-`kind` field and uses hashline anchors copied exactly from `read` or `grep`.
-An anchor is `<line>:<3-character-hash>` without source text or `|`.
+Pass one operation object with a `kind` field and hashline anchors copied
+exactly from `read` or `grep`. An anchor is `<line>:<3-character-hash>`
+without source text or `|`.
 
-`insert_before` and `insert_after` require `path`, `anchor`, and `lines`.
-`replace` requires `path`, `anchor_start`, `anchor_end`, and `lines`.
+`insert_before` and `insert_after` require `path`, `anchor`, and `content`.
+`replace` requires `path`, `anchor_start`, `anchor_end`, and `content`.
 `delete` requires `path`, `anchor_start`, and `anchor_end`.
 
-`lines` is an array of replacement lines. The start and end anchors are
-inclusive. Never invent or recompute an anchor. A stale or ambiguous anchor
-means the file changed: read it again before retrying.
+`content` is the replacement text. The start and end anchors are inclusive.
+Never invent or recompute an anchor. A stale or ambiguous anchor means the
+file changed: read it again before retrying.

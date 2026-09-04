@@ -309,8 +309,6 @@ impl TurnEngine {
                         name: String::new(),
                         arguments: String::new(),
                         canonical_arguments: None,
-                        custom: false,
-                        input_done: true,
                     });
                     if let Some(name) = name {
                         call.name = name;
@@ -319,50 +317,6 @@ impl TurnEngine {
                         call.id = ToolCallId::from_external(id.clone());
                     }
                     call.arguments.push_str(&arguments);
-                }
-                ProviderEvent::CustomToolCallInputDelta {
-                    index,
-                    id,
-                    name,
-                    input,
-                } => {
-                    let call = calls.entry(index).or_insert_with(|| AssembledCall {
-                        id: ToolCallId::new(),
-                        name: String::new(),
-                        arguments: String::new(),
-                        canonical_arguments: None,
-                        custom: true,
-                        input_done: false,
-                    });
-                    call.custom = true;
-                    call.input_done = false;
-                    if let Some(name) = name {
-                        call.name = name;
-                    }
-                    if let Some(id) = id {
-                        call.id = ToolCallId::from_external(id);
-                    }
-                    self.operations()
-                        .emit(RuntimeEvent::ToolInputDelta {
-                            turn_id,
-                            name: call.name.clone(),
-                            input: input.clone(),
-                        })
-                        .await?;
-                    call.arguments.push_str(&input);
-                }
-                ProviderEvent::CustomToolCallInputDone { index, input } => {
-                    let call = calls.entry(index).or_insert_with(|| AssembledCall {
-                        id: ToolCallId::new(),
-                        name: String::new(),
-                        arguments: String::new(),
-                        canonical_arguments: None,
-                        custom: true,
-                        input_done: true,
-                    });
-                    call.custom = true;
-                    call.arguments = input;
-                    call.input_done = true;
                 }
                 ProviderEvent::OutputPart { index, part } => {
                     has_output_parts = true;
@@ -395,18 +349,6 @@ impl TurnEngine {
                                 arguments => arguments.to_string(),
                             },
                             canonical_arguments: Some(arguments.clone()),
-                            custom: part
-                                .provider_data
-                                .as_ref()
-                                .and_then(|data| data.data.get("type"))
-                                .and_then(Value::as_str)
-                                == Some("custom_tool_call")
-                                || self
-                                    .registry()
-                                    .tool_by_name(name)
-                                    .map(|tool| tool.definition().input.freeform.is_some())
-                                    .unwrap_or(false),
-                            input_done: true,
                         },
                         _ => return None,
                     };
@@ -425,13 +367,6 @@ impl TurnEngine {
             for call in calls.values() {
                 let arguments = match &call.canonical_arguments {
                     Some(arguments) => arguments.clone(),
-                    None if call.custom => self
-                        .registry()
-                        .tool_by_name(&call.name)
-                        .ok_or_else(|| Error::Provider(format!("unknown tool: {}", call.name)))?
-                        .definition()
-                        .input
-                        .parse_freeform(&call.arguments)?,
                     None => serde_json::from_str(&call.arguments)
                         .unwrap_or_else(|_| Value::String(call.arguments.clone())),
                 };
@@ -443,11 +378,6 @@ impl TurnEngine {
             }
             parts
         };
-        if calls.values().any(|call| call.custom && !call.input_done) {
-            return Err(Error::Provider(
-                "custom tool input ended before the input was complete".into(),
-            ));
-        }
         Ok(CollectedRound {
             parts,
             calls: calls.into_values().collect(),
@@ -487,7 +417,6 @@ impl TurnEngine {
         }
         let input: ToolInput = match call.canonical_arguments {
             Some(arguments) => arguments,
-            None if call.custom => tool.definition().input.parse_freeform(&call.arguments)?,
             None => serde_json::from_str::<Value>(&call.arguments)
                 .unwrap_or(Value::String(call.arguments)),
         };
@@ -641,8 +570,6 @@ struct AssembledCall {
     name: String,
     arguments: String,
     canonical_arguments: Option<Value>,
-    custom: bool,
-    input_done: bool,
 }
 
 #[cfg(test)]

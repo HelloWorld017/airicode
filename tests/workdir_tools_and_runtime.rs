@@ -80,7 +80,6 @@ async fn read_and_shell_tools_use_the_shared_workdir_contract() -> Result<()> {
     assert!(content.contains("|fn main() {}"));
 
     let shell = ToolShell::new();
-    assert!(shell.definition().input.freeform.is_some());
     let output = shell
         .execute(json!({ "command": "printf shell-output" }), context)
         .await?;
@@ -357,28 +356,24 @@ async fn fake_provider_completes_a_read_tool_turn_on_a_real_project() -> Result<
 }
 
 #[tokio::test]
-async fn fake_provider_executes_custom_shell_input_after_streaming_done() -> Result<()> {
+async fn fake_provider_executes_function_shell_input_after_streaming_done() -> Result<()> {
     let directory = tempdir()?;
     let provider_id = ProviderId::new();
     let provider = Arc::new(FakeProvider::new(
         provider_id,
         [
             vec![
-                ProviderEvent::CustomToolCallInputDelta {
+                ProviderEvent::ToolCallDelta {
                     index: 0,
                     id: Some("call-shell".into()),
                     name: Some("shell".into()),
-                    input: "printf custom-".into(),
+                    arguments: r#"{"command":"printf function-"#.into(),
                 },
-                ProviderEvent::CustomToolCallInputDelta {
+                ProviderEvent::ToolCallDelta {
                     index: 0,
                     id: None,
                     name: None,
-                    input: "output".into(),
-                },
-                ProviderEvent::CustomToolCallInputDone {
-                    index: 0,
-                    input: "printf custom-output".into(),
+                    arguments: r#"output"}"#.into(),
                 },
                 ProviderEvent::Finished {
                     reason: airicode::core::models::FinishReason::ToolCalls,
@@ -404,7 +399,6 @@ async fn fake_provider_executes_custom_shell_input_after_streaming_done() -> Res
         .await?;
     let group_id = SessionGroupId::new();
     let session = core.create_session(group_id)?;
-    let mut events = session.subscribe();
     let engine = session.turn_engine();
     let request = TurnRequest::new(provider_id, "fake-model", "build", "run the command");
     engine.run(request).await?;
@@ -416,17 +410,10 @@ async fn fake_provider_executes_custom_shell_input_after_streaming_done() -> Res
                 part.content.as_ref(),
                 Some(airicode::core::models::MessagePartContent::ToolResult {
                     result: ToolOutput::Success { content }, ..
-                }) if content.contains("custom-output")
+                }) if content.contains("function-output")
             )
         })
     }));
-    assert!(
-        std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(
-            event,
-            RuntimeEvent::ToolInputDelta { name, input, .. }
-                if name == "shell" && input == "printf custom-"
-        ))
-    );
     Ok(())
 }
 

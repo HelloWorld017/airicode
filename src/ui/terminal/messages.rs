@@ -19,22 +19,16 @@ pub enum TimelineEntry {
     Message(Message),
     Note(Note),
     StreamingAssistant { text: String, reasoning: bool },
-    StreamingTool { name: String, input: String },
 }
 
-pub fn timeline(
-    state: &SessionState,
-    streaming: Option<&str>,
-    tool_streaming: Option<(&str, &str)>,
-) -> Vec<TimelineEntry> {
-    timeline_with_reasoning(state, streaming, None, tool_streaming)
+pub fn timeline(state: &SessionState, streaming: Option<&str>) -> Vec<TimelineEntry> {
+    timeline_with_reasoning(state, streaming, None)
 }
 
 pub fn timeline_with_reasoning(
     state: &SessionState,
     streaming: Option<&str>,
     reasoning: Option<&str>,
-    tool_streaming: Option<(&str, &str)>,
 ) -> Vec<TimelineEntry> {
     let mut entries = state
         .visible_messages()
@@ -46,9 +40,7 @@ pub fn timeline_with_reasoning(
     entries.sort_by_key(|entry| match entry {
         TimelineEntry::Message(message) => message.created_at,
         TimelineEntry::Note(note) => note.created_at,
-        TimelineEntry::StreamingAssistant { .. } | TimelineEntry::StreamingTool { .. } => {
-            TimeSeq::from_parts(u64::MAX, u16::MAX)
-        }
+        TimelineEntry::StreamingAssistant { .. } => TimeSeq::from_parts(u64::MAX, u16::MAX),
     });
     if let Some(text) = reasoning.filter(|text| !text.is_empty()) {
         entries.push(TimelineEntry::StreamingAssistant {
@@ -60,12 +52,6 @@ pub fn timeline_with_reasoning(
         entries.push(TimelineEntry::StreamingAssistant {
             text: text.into(),
             reasoning: false,
-        });
-    }
-    if let Some((name, input)) = tool_streaming.filter(|(_, input)| !input.is_empty()) {
-        entries.push(TimelineEntry::StreamingTool {
-            name: name.into(),
-            input: input.into(),
         });
     }
     entries
@@ -131,7 +117,7 @@ pub fn build_transcript(
     streaming: Option<&str>,
     reasoning: Option<&str>,
 ) -> Vec<TranscriptItem> {
-    timeline_with_reasoning(state, streaming, reasoning, None)
+    timeline_with_reasoning(state, streaming, reasoning)
         .into_iter()
         .flat_map(transcript_items_for_entry)
         .collect()
@@ -150,8 +136,6 @@ fn transcript_items_for_entry(entry: TimelineEntry) -> Vec<TranscriptItem> {
             content: text,
             reasoning,
         }],
-        // Tool calls and their streaming arguments are protocol details, not transcript content.
-        TimelineEntry::StreamingTool { .. } => Vec::new(),
     }
 }
 

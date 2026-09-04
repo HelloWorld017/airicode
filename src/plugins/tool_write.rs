@@ -3,7 +3,6 @@ use std::{path::Path, sync::Arc};
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::{
     core::{
@@ -50,10 +49,7 @@ impl Tool for ToolWrite {
         ToolDefinition {
             name: "write".into(),
             description: "Create a file or replace its entire UTF-8 content. Pass `{ \"path\": \"...\", \"content\": \"...\" }`.".into(),
-            input: ToolInputDefinition::new(json_schema::<WriteInput>()).with_freeform(
-                "Create a file or replace its entire UTF-8 content. Put the path on the first line and all file content after the first newline.",
-                parse_write_freeform,
-            ),
+            input: ToolInputDefinition::new(json_schema::<WriteInput>()),
         }
     }
 
@@ -85,21 +81,6 @@ impl Tool for ToolWrite {
     }
 }
 
-pub fn parse_write_freeform(input: &str) -> Result<Value> {
-    let (path, content) = input
-        .split_once('\n')
-        .ok_or_else(|| Error::Tool("write freeform input requires a path line".into()))?;
-    let path = path.strip_suffix('\r').unwrap_or(path);
-    if path.is_empty() {
-        return Err(Error::Tool("write path must not be empty".into()));
-    }
-    serde_json::to_value(WriteInput {
-        path: path.into(),
-        content: content.into(),
-    })
-    .map_err(|error| Error::Tool(format!("invalid write input: {error}")))
-}
-
 pub struct ToolWritePlugin {
     id: PluginId,
     tool: Arc<ToolWrite>,
@@ -126,32 +107,5 @@ impl Plugin for ToolWritePlugin {
 
     async fn init(self: Arc<Self>, registry: PluginRegistryScope) -> Result<()> {
         registry.register_tool(self.tool.clone(), 0).map(|_| ())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn freeform_uses_path_on_first_line_and_preserves_content() {
-        assert_eq!(
-            parse_write_freeform("dir/my file.txt\r\nfirst\n<<<EOF\nlast")
-                .expect("valid write input"),
-            serde_json::json!({
-                "path": "dir/my file.txt",
-                "content": "first\n<<<EOF\nlast"
-            })
-        );
-        assert_eq!(
-            parse_write_freeform("empty.txt\n").expect("empty content is valid"),
-            serde_json::json!({ "path": "empty.txt", "content": "" })
-        );
-    }
-
-    #[test]
-    fn freeform_requires_a_non_empty_path_line() {
-        assert!(parse_write_freeform("missing-newline").is_err());
-        assert!(parse_write_freeform("\ncontent").is_err());
     }
 }

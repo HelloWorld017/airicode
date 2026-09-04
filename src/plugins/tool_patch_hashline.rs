@@ -37,30 +37,23 @@ TAG
 DELETE path FROM line:hash TO line:hash"#;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(deny_unknown_fields)]
-struct PatchHashlineInput {
-    #[schemars(length(min = 1))]
-    operations: Vec<PatchHashlineOperation>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum PatchHashlineOperation {
     InsertBefore {
         path: String,
         anchor: String,
-        lines: Vec<String>,
+        content: String,
     },
     InsertAfter {
         path: String,
         anchor: String,
-        lines: Vec<String>,
+        content: String,
     },
     Replace {
         path: String,
         anchor_start: String,
         anchor_end: String,
-        lines: Vec<String>,
+        content: String,
     },
     Delete {
         path: String,
@@ -169,15 +162,12 @@ impl Tool for ToolPatchHashline {
         ToolDefinition {
             name: "patch_hashline".into(),
             description: include_str!("../prompts/tool_patch_hashline.txt").into(),
-            input: ToolInputDefinition::new(json_schema::<PatchHashlineInput>()).with_freeform(
-                include_str!("../prompts/tool_patch_hashline_freeform.txt"),
-                parse_patch_hashline_freeform,
-            ),
+            input: ToolInputDefinition::new(json_schema::<PatchHashlineOperation>()),
         }
     }
 
     async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {
-        let input: PatchHashlineInput = match serde_json::from_value(input) {
+        let input: PatchHashlineOperation = match serde_json::from_value(input) {
             Ok(input) => input,
             Err(error) => {
                 let message = format!("invalid patch_hashline input: {error}");
@@ -195,8 +185,8 @@ impl Tool for ToolPatchHashline {
                 return Ok(output);
             }
         };
-        let operations = match parse_operations(input) {
-            Ok(operations) => operations,
+        let operation = match operation_to_domain(&input) {
+            Ok(operation) => operation,
             Err(message) => {
                 let output = ToolOutput::Failure {
                     content: syntax_error(&message),
@@ -212,20 +202,7 @@ impl Tool for ToolPatchHashline {
                 return Ok(output);
             }
         };
-        if operations.is_empty() {
-            let output = ToolOutput::Failure {
-                content: syntax_error("patch requires at least one operation"),
-            };
-            add_tool_note(
-                &context,
-                NoteContent::Alert {
-                    content: format!("Patch failed: {}", output.content().unwrap_or_default()),
-                },
-                "patch_hashline",
-            )
-            .await?;
-            return Ok(output);
-        }
+        let operations = vec![operation];
 
         // Read every path before resolving any anchor or writing any result.
         let snapshots = collect_snapshots(&operations, &context).await?;
@@ -1002,24 +979,6 @@ fn format_anchor(anchor: &hashline::Anchor) -> String {
     format!("{}:{}", anchor.line, anchor.tag)
 }
 
-pub fn parse_patch_hashline_freeform(input: &str) -> Result<Value> {
-    let operations = parse_hashline_dsl(input).map_err(Error::Tool)?;
-    serde_json::to_value(PatchHashlineInput { operations })
-        .map_err(|error| Error::Tool(format!("invalid patch_hashline input: {error}")))
-}
-
-fn parse_operations(input: PatchHashlineInput) -> std::result::Result<Vec<Operation>, String> {
-    input
-        .operations
-        .iter()
-        .enumerate()
-        .map(|(index, operation)| {
-            operation_to_domain(operation)
-                .map_err(|error| format!("{error} in operation {}", index + 1))
-        })
-        .collect()
-}
-
 fn operation_to_domain(
     operation: &PatchHashlineOperation,
 ) -> std::result::Result<Operation, String> {
@@ -1027,36 +986,36 @@ fn operation_to_domain(
         PatchHashlineOperation::InsertBefore {
             path,
             anchor,
-            lines,
+            content,
         } => Ok(Operation {
             kind: OperationKind::InsertBefore,
             path: parse_path(path)?,
             start: Some(parse_anchor(anchor)?),
             end: None,
-            body: lines.join("\n"),
+            body: content.clone(),
         }),
         PatchHashlineOperation::InsertAfter {
             path,
             anchor,
-            lines,
+            content,
         } => Ok(Operation {
             kind: OperationKind::InsertAfter,
             path: parse_path(path)?,
             start: Some(parse_anchor(anchor)?),
             end: None,
-            body: lines.join("\n"),
+            body: content.clone(),
         }),
         PatchHashlineOperation::Replace {
             path,
             anchor_start,
             anchor_end,
-            lines,
+            content,
         } => Ok(Operation {
             kind: OperationKind::Replace,
             path: parse_path(path)?,
             start: Some(parse_anchor(anchor_start)?),
             end: Some(parse_anchor(anchor_end)?),
-            body: lines.join("\n"),
+            body: content.clone(),
         }),
         PatchHashlineOperation::Delete {
             path,
@@ -1070,149 +1029,6 @@ fn operation_to_domain(
             body: String::new(),
         }),
     }
-}
-
-fn parse_hashline_dsl(text: &str) -> std::result::Result<Vec<PatchHashlineOperation>, String> {
-    let mut operations = Vec::new();
-    let mut lines = text.split_inclusive('\n').enumerate();
-    while let Some((line_number, raw_line)) = lines.next() {
-        let line = trim_line_ending(raw_line);
-        if line.trim().is_empty() {
-            continue;
-        }
-        let header = parse_header(line)
-            .map_err(|message| format!("{message} at line {}", line_number + 1))?;
-        let Some(delimiter) = header.delimiter.clone() else {
-            operations.push(freeform_operation(header, String::new()));
-            continue;
-        };
-
-        let mut body = String::new();
-        let mut closed = false;
-        for (_, raw_body_line) in lines.by_ref() {
-            if trim_line_ending(raw_body_line) == delimiter {
-                closed = true;
-                break;
-            }
-            body.push_str(raw_body_line);
-        }
-        if !closed {
-            return Err(format!(
-                "unterminated heredoc for {} at line {}",
-                header.path,
-                line_number + 1
-            ));
-        }
-        operations.push(freeform_operation(header, body));
-    }
-    Ok(operations)
-}
-
-fn trim_line_ending(line: &str) -> &str {
-    let line = line.strip_suffix('\n').unwrap_or(line);
-    line.strip_suffix('\r').unwrap_or(line)
-}
-
-struct OperationHeader {
-    kind: OperationKind,
-    path: String,
-    start: Option<hashline::Anchor>,
-    end: Option<hashline::Anchor>,
-    delimiter: Option<String>,
-}
-
-fn freeform_operation(header: OperationHeader, body: String) -> PatchHashlineOperation {
-    let lines = body.lines().map(str::to_string).collect();
-    match header.kind {
-        OperationKind::InsertBefore => PatchHashlineOperation::InsertBefore {
-            path: header.path,
-            anchor: format_anchor(&header.start.expect("insert anchor")),
-            lines,
-        },
-        OperationKind::InsertAfter => PatchHashlineOperation::InsertAfter {
-            path: header.path,
-            anchor: format_anchor(&header.start.expect("insert anchor")),
-            lines,
-        },
-        OperationKind::Replace => PatchHashlineOperation::Replace {
-            path: header.path,
-            anchor_start: format_anchor(&header.start.expect("replace start anchor")),
-            anchor_end: format_anchor(&header.end.expect("replace end anchor")),
-            lines,
-        },
-        OperationKind::Delete => PatchHashlineOperation::Delete {
-            path: header.path,
-            anchor_start: format_anchor(&header.start.expect("delete start anchor")),
-            anchor_end: format_anchor(&header.end.expect("delete end anchor")),
-        },
-    }
-}
-
-fn parse_header(line: &str) -> std::result::Result<OperationHeader, String> {
-    if let Some(rest) = line.strip_prefix("REPLACE ") {
-        let (spec, delimiter) = split_heredoc(rest)?;
-        let (path_and_start, end) = spec
-            .rsplit_once(" TO ")
-            .ok_or_else(|| "REPLACE header must contain FROM and TO anchors".to_string())?;
-        let (path, start) = path_and_start
-            .rsplit_once(" FROM ")
-            .ok_or_else(|| "REPLACE header must contain FROM and TO anchors".to_string())?;
-        return Ok(OperationHeader {
-            kind: OperationKind::Replace,
-            path: parse_path(path)?,
-            start: Some(parse_anchor(start)?),
-            end: Some(parse_anchor(end)?),
-            delimiter: Some(delimiter),
-        });
-    }
-    if let Some(rest) = line.strip_prefix("INSERT ") {
-        let (spec, delimiter) = split_heredoc(rest)?;
-        if let Some((path, anchor)) = spec.rsplit_once(" BEFORE ") {
-            return Ok(OperationHeader {
-                kind: OperationKind::InsertBefore,
-                path: parse_path(path)?,
-                start: Some(parse_anchor(anchor)?),
-                end: None,
-                delimiter: Some(delimiter),
-            });
-        }
-        if let Some((path, anchor)) = spec.rsplit_once(" AFTER ") {
-            return Ok(OperationHeader {
-                kind: OperationKind::InsertAfter,
-                path: parse_path(path)?,
-                start: Some(parse_anchor(anchor)?),
-                end: None,
-                delimiter: Some(delimiter),
-            });
-        }
-        return Err("INSERT header must contain BEFORE or AFTER and an anchor".into());
-    }
-    if let Some(rest) = line.strip_prefix("DELETE ") {
-        let (path_and_start, end) = rest
-            .rsplit_once(" TO ")
-            .ok_or_else(|| "DELETE header must contain FROM and TO anchors".to_string())?;
-        let (path, start) = path_and_start
-            .rsplit_once(" FROM ")
-            .ok_or_else(|| "DELETE header must contain FROM and TO anchors".to_string())?;
-        return Ok(OperationHeader {
-            kind: OperationKind::Delete,
-            path: parse_path(path)?,
-            start: Some(parse_anchor(start)?),
-            end: Some(parse_anchor(end)?),
-            delimiter: None,
-        });
-    }
-    Err("invalid patch header".into())
-}
-
-fn split_heredoc(value: &str) -> std::result::Result<(&str, String), String> {
-    let (spec, delimiter) = value
-        .rsplit_once(" <<<")
-        .ok_or_else(|| "patch header must end with <<<heredoc-tag".to_string())?;
-    if delimiter.is_empty() || delimiter.chars().any(char::is_whitespace) {
-        return Err("heredoc tag cannot be empty or contain whitespace".into());
-    }
-    Ok((spec, delimiter.to_string()))
 }
 
 fn parse_path(value: &str) -> std::result::Result<String, String> {
@@ -1329,16 +1145,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn definition_uses_mode_specific_patch_prompts() {
+    fn definition_uses_hashline_patch_prompt() {
         let definition = ToolPatchHashline::new().definition();
 
         assert_eq!(
             definition.description,
             include_str!("../prompts/tool_patch_hashline.txt")
-        );
-        assert_eq!(
-            definition.input.freeform.as_ref().unwrap().description,
-            include_str!("../prompts/tool_patch_hashline_freeform.txt")
         );
     }
 
@@ -1355,6 +1167,8 @@ mod tests {
         assert!(schema.contains("insert_after"));
         assert!(schema.contains("anchor_start"));
         assert!(schema.contains("anchor_end"));
+        assert!(schema.contains("content"));
+        assert!(!schema.contains("operations"));
     }
 
     #[test]

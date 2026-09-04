@@ -46,11 +46,7 @@ impl Tool for ToolShell {
                 "type": "object",
                 "properties": { "command": { "type": "string" } },
                 "required": ["command"]
-            }))
-            .with_freeform(
-                "Execute a shell command in the current workdir. Supply the command as raw text.",
-                parse_shell_freeform,
-            ),
+            })),
         }
     }
     async fn execute(&self, input: ToolInput, context: ToolContext) -> Result<ToolOutput> {
@@ -139,10 +135,6 @@ impl Tool for ToolShell {
             Ok(ToolOutput::Failure { content })
         }
     }
-}
-
-pub fn parse_shell_freeform(input: &str) -> Result<serde_json::Value> {
-    Ok(serde_json::json!({ "command": input }))
 }
 
 pub struct ToolShellPlugin {

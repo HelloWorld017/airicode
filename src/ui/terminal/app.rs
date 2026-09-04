@@ -45,7 +45,6 @@ pub struct TerminalApp {
     model: String,
     streaming: String,
     reasoning: String,
-    tool_streaming: Option<(String, String)>,
     status: String,
     scroll_offset: usize,
     max_scroll: usize,
@@ -86,7 +85,6 @@ impl TerminalApp {
             model: default_model.model_id.clone(),
             streaming: String::new(),
             reasoning: String::new(),
-            tool_streaming: None,
             status: "ready".into(),
             scroll_offset: 0,
             max_scroll: 0,
@@ -311,17 +309,6 @@ impl TerminalApp {
                     self.streaming.push_str(&text);
                 }
             }
-            RuntimeEvent::ToolInputDelta { name, input, .. } => {
-                let entry = self
-                    .tool_streaming
-                    .get_or_insert_with(|| (name.clone(), String::new()));
-                if entry.0 != name {
-                    entry.0 = name.clone();
-                    entry.1.clear();
-                }
-                entry.1.push_str(&input);
-                self.status = format!("preparing {name}");
-            }
             RuntimeEvent::ProviderUsageUpdated { usage, .. } => {
                 self.statusbar.usage = Some(usage);
             }
@@ -330,24 +317,20 @@ impl TerminalApp {
                 self.reasoning.clear();
             }
             RuntimeEvent::TurnCompleted { .. } => {
-                self.tool_streaming = None;
                 self.status = "ready".into();
             }
             RuntimeEvent::TurnCancelled { .. } => {
-                self.tool_streaming = None;
                 self.status = "cancelled".into();
             }
             RuntimeEvent::TurnFailed { error, .. } => {
                 self.streaming.clear();
                 self.reasoning.clear();
-                self.tool_streaming = None;
                 self.status = format!("error: {error}");
             }
             RuntimeEvent::ToolExecutionStarted { name, .. } => {
                 self.status = format!("running {name}");
             }
             RuntimeEvent::ToolExecutionFinished { .. } => {
-                self.tool_streaming = None;
                 self.status = "running".into();
             }
             _ => {}
@@ -374,7 +357,6 @@ impl TerminalApp {
         self.editor = EditorState::default();
         self.streaming.clear();
         self.reasoning.clear();
-        self.tool_streaming = None;
         self.status = "ready".into();
         self.statusbar.usage = None;
         self.statusbar.status = self.status.clone();

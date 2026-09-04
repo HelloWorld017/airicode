@@ -1,7 +1,9 @@
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::Value;
 
 use crate::{
     core::{
@@ -12,8 +14,15 @@ use crate::{
         },
         registry::PluginRegistryScope,
     },
-    utils::note::add_tool_note,
+    utils::{note::add_tool_note, schema::json_schema},
 };
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ApplyPatchInput {
+    #[schemars(description = "Patch content using the *** Begin Patch/End Patch format.")]
+    input: String,
+}
 
 pub struct ToolPatchApplyPatch {
     id: ToolId,
@@ -44,19 +53,10 @@ impl Tool for ToolPatchApplyPatch {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "apply_patch".into(),
-            description: format!(
-                "{}\n\nThe JSON fallback is `{{ \"patch\": \"...\" }}`.",
-                include_str!("../prompts/tool_patch_apply_patch.txt").trim()
-            ),
-            input: ToolInputDefinition::new(json!({
-                "type": "object",
-                "properties": { "patch": { "type": "string" } },
-                "required": ["patch"]
-            }))
-            .with_freeform(
-                include_str!("../prompts/tool_patch_apply_patch.txt"),
-                parse_apply_patch_freeform,
-            ),
+            description: include_str!("../prompts/tool_patch_apply_patch.txt")
+                .trim()
+                .into(),
+            input: ToolInputDefinition::new(json_schema::<ApplyPatchInput>()),
         }
     }
 
@@ -89,11 +89,9 @@ impl Tool for ToolPatchApplyPatch {
 
 impl ToolPatchApplyPatch {
     async fn apply(&self, input: Value, context: &ToolContext) -> Result<String> {
-        let patch = input
-            .get("patch")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::Tool("apply_patch requires patch".into()))?;
-        let operations = parse_apply_patch(patch).map_err(Error::Tool)?;
+        let input: ApplyPatchInput = serde_json::from_value(input)
+            .map_err(|error| Error::Tool(format!("invalid apply_patch input: {error}")))?;
+        let operations = parse_apply_patch(&input.input).map_err(Error::Tool)?;
         let mut files = BTreeMap::new();
         let mut added = 0;
         let mut updated = 0;
@@ -206,10 +204,6 @@ impl ToolPatchApplyPatch {
             "Applied patch: {added} added, {updated} updated, {deleted} deleted, {moved} moved"
         ))
     }
-}
-
-pub fn parse_apply_patch_freeform(input: &str) -> Result<Value> {
-    Ok(json!({ "patch": input }))
 }
 
 #[derive(Debug)]
@@ -458,5 +452,16 @@ mod tests {
             "*** Begin Patch\n*** Add File: new.txt\n+new\n*** Update File: old.txt\n*** Move to: moved.txt\n@@\n-old\n+new\n*** Delete File: deleted.txt\n*** End Patch"
         )
         .is_ok());
+    }
+
+    #[test]
+    fn definition_requires_described_input() {
+        let schema = ToolPatchApplyPatch::new().definition().input.schema;
+
+        assert_eq!(schema["required"], serde_json::json!(["input"]));
+        assert_eq!(
+            schema["properties"]["input"]["description"],
+            "Patch content using the *** Begin Patch/End Patch format."
+        );
     }
 }

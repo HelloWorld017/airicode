@@ -236,9 +236,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn patch_is_json_only() {
+    fn patch_requires_path_and_edits() {
         let input = ToolPatch::new().definition().input;
-        assert!(input.freeform.is_none());
         assert_eq!(input.schema["required"], json!(["path", "edits"]));
     }
 }

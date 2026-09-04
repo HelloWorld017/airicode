@@ -22,57 +22,16 @@ impl ToolOutput {
         }
     }
 }
-pub type ToolFreeformParser = fn(&str) -> Result<Value>;
 pub type ToolInput = Value;
 
-#[derive(Clone, Debug)]
-pub struct ToolFreeformDefinition {
-    pub description: String,
-    pub parser: ToolFreeformParser,
-}
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ToolInputDefinition {
     pub schema: Value,
-    pub freeform: Option<ToolFreeformDefinition>,
-}
-
-impl PartialEq for ToolInputDefinition {
-    fn eq(&self, other: &Self) -> bool {
-        self.schema == other.schema
-            && self.freeform.as_ref().map(|freeform| &freeform.description)
-                == other
-                    .freeform
-                    .as_ref()
-                    .map(|freeform| &freeform.description)
-    }
 }
 
 impl ToolInputDefinition {
     pub fn new(schema: Value) -> Self {
-        Self {
-            schema,
-            freeform: None,
-        }
-    }
-
-    pub fn with_freeform(
-        mut self,
-        description: impl Into<String>,
-        parser: ToolFreeformParser,
-    ) -> Self {
-        self.freeform = Some(ToolFreeformDefinition {
-            description: description.into(),
-            parser,
-        });
-        self
-    }
-
-    pub fn parse_freeform(&self, input: &str) -> Result<Value> {
-        let freeform = self.freeform.as_ref().ok_or_else(|| {
-            super::super::error::Error::Tool("tool does not support freeform input".into())
-        })?;
-        (freeform.parser)(input)
+        Self { schema }
     }
 }
 

@@ -277,7 +277,7 @@ async fn patch_rejects_non_unique_or_overlapping_edits_without_writing() -> Resu
 }
 
 #[tokio::test]
-async fn hashline_patch_json_and_freeform_inputs_share_the_executor() -> Result<()> {
+async fn hashline_patch_accepts_a_single_json_operation() -> Result<()> {
     let directory = tempdir()?;
     let workdir: Arc<dyn Workdir> = Arc::new(NativeWorkdir::new(directory.path())?);
     let original = "one\ntwo\nthree\n";
@@ -289,13 +289,11 @@ async fn hashline_patch_json_and_freeform_inputs_share_the_executor() -> Result<
     let (_first_session, first_context) = context(&directory).await?;
     tool.execute(
         json!({
-            "operations": [{
-                "kind": "replace",
-                "path": "main.txt",
-                "anchor_start": format!("{}:{}", tags[1].line, tags[1].tag),
-                "anchor_end": format!("{}:{}", tags[1].line, tags[1].tag),
-                "lines": ["TWO"]
-            }]
+            "kind": "replace",
+            "path": "main.txt",
+            "anchor_start": format!("{}:{}", tags[1].line, tags[1].tag),
+            "anchor_end": format!("{}:{}", tags[1].line, tags[1].tag),
+            "content": "TWO"
         }),
         first_context,
     )
@@ -305,17 +303,6 @@ async fn hashline_patch_json_and_freeform_inputs_share_the_executor() -> Result<
         b"one\nTWO\nthree\n"
     );
 
-    let fresh = hashline::render("one\nTWO\nthree\n");
-    let input = ToolPatchHashline::new()
-        .definition()
-        .input
-        .parse_freeform(&format!(
-            "DELETE main.txt FROM {}:{} TO {}:{}",
-            fresh[1].line, fresh[1].tag, fresh[1].line, fresh[1].tag
-        ))?;
-    let (_second_session, second_context) = context(&directory).await?;
-    tool.execute(input, second_context).await?;
-    assert_eq!(workdir.read(Path::new("main.txt")).await?, b"one\nthree\n");
     Ok(())
 }
 
@@ -335,7 +322,7 @@ async fn apply_patch_supports_file_lifecycle_operations() -> Result<()> {
         .await?;
     ToolPatchApplyPatch::new()
         .execute(
-            json!({ "patch": "*** Begin Patch\n*** Add File: new.txt\n+new\n*** Update File: main.txt\n*** Move to: moved.txt\n@@\n-before\n+after\n*** Delete File: obsolete.txt\n*** End Patch" }),
+            json!({ "input": "*** Begin Patch\n*** Add File: new.txt\n+new\n*** Update File: main.txt\n*** Move to: moved.txt\n@@\n-before\n+after\n*** Delete File: obsolete.txt\n*** End Patch" }),
             ctx.clone(),
         )
         .await?;
